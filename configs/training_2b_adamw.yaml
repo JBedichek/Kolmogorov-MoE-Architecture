@@ -1,0 +1,81 @@
+# MoE Transformer Training - 2B Model with AdamW (Debug Memory)
+
+# Model configuration
+model:
+  # Architecture (~2B parameters)
+  vocab_size: 50257
+  d_model: 1536
+  n_layers: 20
+  n_heads: 12
+  n_kv_heads: 3
+  head_dim: 128
+  d_ff: 4096
+  max_seq_len: 512  # Very short to save memory
+
+  # MoE configuration
+  n_experts: 8
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 2048
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19]  # 10 MoE layers
+
+  # MoD configuration - DISABLED
+  mod_enabled: false
+
+  # Mamba configuration - DISABLED to save memory
+  mamba_enabled: false
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: []
+
+  # Multi-token prediction
+  n_pred_tokens: 2  # Reduced from 4
+  aux_loss_weights: [1.0, 0.5]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  total_tokens: 100_000_000_000
+  batch_size: 1
+  gradient_accumulation_steps: 1  # Minimal
+
+  max_lr: 0.0003  # AdamW learning rate
+  min_lr_ratio: 0.1
+  warmup_steps: 100  # Reduced from 2000
+
+  gradient_clip_norm: 1.0
+  weight_decay: 0.1
+
+  checkpoint_dir: "./checkpoints"
+  log_interval: 10
+  eval_interval: 1000
+  save_interval: 1000
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"  # Pure AdamW
+  momentum: 0.95
+  weight_decay: 0.1
+
+# Data configuration
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false
+  data_path: null
+  num_workers: 2
+
+# Weights & Biases
+wandb:
+  project: "moe-architecture"
+  run_name: "moe-2b-adamw-debug"
+  entity: null

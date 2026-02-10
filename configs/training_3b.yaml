@@ -1,0 +1,91 @@
+# MoE Transformer Training Configuration - 3B Model (Memory Optimized)
+
+# Model configuration
+model:
+  # Architecture (~3B parameters)
+  vocab_size: 50257  # GPT-2 vocab size
+  d_model: 1792  # Reduced from 2048
+  n_layers: 24  # Reduced from 28
+  n_heads: 16
+  n_kv_heads: 4  # GQA 4:1 ratio
+  head_dim: 112  # d_model / n_heads
+  d_ff: 4608  # ~2.5x d_model
+  max_seq_len: 2048  # Reduced from 2048 to save memory
+
+  # MoE configuration
+  n_experts: 14  # Reduced from 12
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 2304  # Half of d_ff
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23]  # 12 MoE layers for 24-layer model
+
+  # MoD configuration
+  mod_enabled: true  # Disabled to save memory (router overhead)
+  mod_capacity_factor: 0.75
+  mod_router_hidden_dim: 128
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration
+  mamba_enabled: true
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: [5, 9, 13, 17, 21]  # 5 Mamba layers for 24-layer model
+
+  # Multi-token prediction
+  n_pred_tokens: 4
+  aux_loss_weights: [1.0, 0.5, 0.3, 0.2]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  # Scale
+  total_tokens: 100_000_000_000  # 100B tokens
+  batch_size: 1  # Per-device batch size
+  gradient_accumulation_steps: 4  # Reduced from 8 to save memory
+
+  # Learning rate
+  max_lr: 0.001  # 1e-3 for Muon
+  min_lr_ratio: 0.1
+  warmup_steps: 100  # Reduced from 2000 - too long for small batch size
+
+  # Regularization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Logging and checkpointing
+  checkpoint_dir: "./checkpoints"
+  log_interval: 10
+  eval_interval: 1000
+  save_interval: 1000
+
+# Optimizer configuration
+optimizer:
+  type: "muon"  # Hybrid Muon + AdamW (Muon for 2D, AdamW for 1D)
+  momentum: 0.95
+  weight_decay: 0.01
+  nesterov: true
+  backend: "newton"
+  newton_iters: 5
+
+# Data configuration
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false
+  data_path: null
+  num_workers: 4
+
+# Weights & Biases configuration
+wandb:
+  project: "moe-architecture"
+  run_name: "moe-3b-dolma"
+  entity: null

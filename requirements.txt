@@ -1,0 +1,31 @@
+# Core dependencies
+torch>=2.1.0
+numpy>=1.24.0
+einops>=0.7.0
+
+# Transformers and tokenization
+transformers>=4.35.0
+
+# Optimized attention and SSM
+flash-attn>=2.3.0
+mamba-ssm>=1.0.0
+
+# Training and logging
+wandb>=0.15.0
+tensorboard>=2.14.0
+
+# Model checkpointing
+safetensors>=0.4.0
+
+# Data processing
+datasets>=2.14.0
+tqdm>=4.66.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Development
+black>=23.10.0
+isort>=5.12.0
+flake8>=6.1.0

@@ -1,0 +1,53 @@
+# Test configuration for quick testing
+
+model:
+  vocab_size: 1000
+  d_model: 256
+  n_layers: 4
+  n_heads: 8
+  n_kv_heads: 2
+  head_dim: 32
+  d_ff: 512
+  max_seq_len: 128
+  n_experts: 4
+  moe_top_k: 2
+  d_ff_expert: 256
+  moe_layers: [1, 2]  # Override default (which assumes 32 layers)
+  mod_enabled: true
+  mod_capacity_factor: 0.75
+  mamba_enabled: true
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: [1]  # Override default (which assumes 32 layers)
+  n_pred_tokens: 2
+  aux_loss_weights: [1.0, 0.5]
+  use_flash_attention: false
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+training:
+  total_tokens: 1_000_000  # 1M tokens for testing
+  batch_size: 2
+  gradient_accumulation_steps: 2
+  max_lr: 0.001
+  min_lr_ratio: 0.1
+  warmup_steps: 10
+  gradient_clip_norm: 1.0
+  checkpoint_dir: "./test_checkpoints"
+  log_interval: 5
+  eval_interval: 50
+  save_interval: 100
+
+optimizer:
+  type: "muon"
+  momentum: 0.95
+  weight_decay: 0.01
+
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false
+  num_workers: 0

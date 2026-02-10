@@ -1,0 +1,85 @@
+# MoE Transformer Training - 4B Model with High Sparsity (32 experts, top-4)
+# ~4.2B total params, ~1.5B active params per forward pass
+
+# Model configuration
+model:
+  # Architecture (~4.2B total, ~1.5B active)
+  vocab_size: 50257  # GPT-2 vocab size
+  d_model: 1920
+  n_layers: 26
+  n_heads: 16
+  n_kv_heads: 4  # GQA 4:1 ratio
+  head_dim: 120  # d_model / n_heads
+  d_ff: 5120  # ~2.67x d_model
+  max_seq_len: 1024  # Conservative for memory
+
+  # MoE configuration - HIGH SPARSITY (12.5% expert activation)
+  n_experts: 32  # 4x more experts than 3B config
+  moe_top_k: 4  # Top-4 routing (4/32 = 12.5% active)
+  moe_capacity_factor: 1.25
+  d_ff_expert: 1280  # Quarter of d_ff (keeps active params similar to dense)
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 25]  # 13 MoE layers
+
+  # MoD configuration - DISABLED
+  mod_enabled: true
+  mod_capacity_factor: 0.75
+  mod_router_hidden_dim: 128
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration
+  mamba_enabled: true
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: [5, 9, 13, 17, 21]  # 5 Mamba layers
+
+  # Multi-token prediction
+  n_pred_tokens: 4
+  aux_loss_weights: [1.0, 0.5, 0.3, 0.2]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  total_tokens: 100_000_000_000  # 100B tokens
+  batch_size: 1
+  gradient_accumulation_steps: 4
+
+  max_lr: 0.0003  # AdamW learning rate
+  min_lr_ratio: 0.1
+  warmup_steps: 100  # Reduced from 2000
+
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  checkpoint_dir: "./checkpoints"
+  log_interval: 10
+  eval_interval: 1000
+  save_interval: 1000
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"  # Using AdamW for stability
+  momentum: 0.95
+  weight_decay: 0.01
+
+# Data configuration
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false
+  data_path: null
+  num_workers: 4
+
+# Weights & Biases
+wandb:
+  project: "moe-architecture"
+  run_name: "moe-4b-sparse-32x4"
+  entity: null

@@ -1,0 +1,91 @@
+# MoE Transformer Training Configuration - 4.5B Model
+
+# Model configuration
+model:
+  # Architecture (~4.5B parameters)
+  vocab_size: 50257  # GPT-2 vocab size
+  d_model: 2048
+  n_layers: 28  # Reduced from 32
+  n_heads: 16
+  n_kv_heads: 4  # GQA 4:1 ratio
+  head_dim: 128
+  d_ff: 5120  # Reduced from 5632
+  max_seq_len: 2048
+
+  # MoE configuration
+  n_experts: 12  # Reduced from 16
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 2560  # Reduced from 2816
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27]  # 14 MoE layers for 28-layer model
+
+  # MoD configuration
+  mod_enabled: true
+  mod_capacity_factor: 0.75  # 75% tokens processed, 25% skip
+  mod_router_hidden_dim: 128
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration
+  mamba_enabled: true
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: [5, 9, 13, 17, 21, 25]  # 6 Mamba layers for 28-layer model
+
+  # Multi-token prediction
+  n_pred_tokens: 4
+  aux_loss_weights: [1.0, 0.5, 0.3, 0.2]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  # Scale
+  total_tokens: 100_000_000_000  # 100B tokens
+  batch_size: 1  # Per-device batch size
+  gradient_accumulation_steps: 8  # Effective batch size = 8
+
+  # Learning rate
+  max_lr: 0.001  # 1e-3 for Muon (higher than AdamW)
+  min_lr_ratio: 0.1  # min_lr = 0.1 * max_lr
+  warmup_steps: 100  # Reduced from 2000
+
+  # Regularization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Logging and checkpointing
+  checkpoint_dir: "./checkpoints"
+  log_interval: 10  # Log every 10 steps
+  eval_interval: 1000  # Evaluate every 1000 steps
+  save_interval: 1000  # Save checkpoint every 1000 steps
+
+# Optimizer configuration
+optimizer:
+  type: "muon"  # or "adamw"
+  momentum: 0.95  # For Muon
+  weight_decay: 0.01
+  nesterov: true
+  backend: "newton"  # or "qr"
+  newton_iters: 5
+
+# Data configuration
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false  # Set to true if using pre-tokenized data
+  data_path: null  # Set to data directory if use_memory_mapped=true
+  num_workers: 4
+
+# Weights & Biases configuration (optional)
+wandb:
+  project: "moe-architecture"
+  run_name: "moe-4.5b-dolma"
+  entity: null  # Set to your W&B username/team

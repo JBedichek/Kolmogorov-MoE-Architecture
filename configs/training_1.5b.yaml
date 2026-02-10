@@ -1,0 +1,87 @@
+# MoE Transformer Training Configuration - 1.5B Model (Maximum Memory Safety)
+
+# Model configuration
+model:
+  # Architecture (~1.5B parameters)
+  vocab_size: 50257
+  d_model: 1536  # Reduced
+  n_layers: 20  # Reduced
+  n_heads: 12
+  n_kv_heads: 3  # GQA 4:1 ratio
+  head_dim: 128
+  d_ff: 4096  # ~2.6x d_model
+  max_seq_len: 1024
+
+  # MoE configuration
+  n_experts: 8
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 2048
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19]  # 10 MoE layers
+
+  # MoD configuration
+  mod_enabled: true  # Disabled
+  mod_capacity_factor: 0.75
+  mod_router_hidden_dim: 128
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration
+  mamba_enabled: true
+  ssm_state_dim: 16
+  ssm_expansion: 2
+  mamba_layers: [5, 9, 13, 17]  # 4 Mamba layers
+
+  # Multi-token prediction
+  n_pred_tokens: 4
+  aux_loss_weights: [1.0, 0.5, 0.3, 0.2]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.1
+  attention_dropout: 0.1
+  residual_dropout: 0.1
+
+# Training configuration
+training:
+  total_tokens: 100_000_000_000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+
+  max_lr: 0.0003  # Lower for AdamW (use 0.001 for Muon)
+  min_lr_ratio: 0.1
+  warmup_steps: 100  # Reduced from 2000
+
+  gradient_clip_norm: 1.0
+  weight_decay: 0.1
+
+  checkpoint_dir: "./checkpoints"
+  log_interval: 10
+  eval_interval: 1000
+  save_interval: 1000
+
+# Optimizer configuration
+optimizer:
+  type: "muon"  # Hybrid Muon + AdamW (Muon for 2D, AdamW for 1D)
+  momentum: 0.95
+  weight_decay: 0.01
+  nesterov: true
+  backend: "newton"
+  newton_iters: 5
+
+# Data configuration
+data:
+  tokenizer_name: "gpt2"
+  use_memory_mapped: false
+  data_path: null
+  num_workers: 2  # Reduced
+
+# Weights & Biases
+wandb:
+  project: "moe-architecture"
+  run_name: "moe-1.5b-dolma"
+  entity: null
