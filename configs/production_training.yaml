@@ -1,0 +1,111 @@
+# Production Training Configuration for MoE with FineWeb
+
+# Model configuration
+model:
+  vocab_size: 50257
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 3
+  head_dim: 64
+  d_ff: 2048
+  max_seq_len: 2048
+
+  # MoE configuration
+  n_experts: 32
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 1024
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [2, 3, 6, 7, 10, 11]  # 6 MoE layers
+
+  # MoD configuration
+  mod_enabled: true
+  mod_capacity_factor: 0.75
+  mod_router_hidden_dim: 128
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Multi-token prediction
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Optimizations
+  use_flash_attention: false
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  # Total training tokens (10B for this example)
+  total_tokens: 10_000_000_000  # 10B tokens
+
+  # Batch configuration
+  batch_size: 1
+  gradient_accumulation_steps: 8
+
+  # Learning rate
+  max_lr: 0.001
+  min_lr_ratio: 0.1
+  warmup_steps: 1000
+
+  # Optimization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Checkpointing
+  checkpoint_dir: "./checkpoints_production"
+  save_interval: 1000  # Save every 1000 steps
+
+  # Logging
+  log_interval: 10
+  eval_interval: 500
+
+  # Resume from checkpoint (set to path or null)
+  resume_from: null
+
+# Optimizer configuration
+optimizer:
+  type: "muon"
+  momentum: 0.95
+  weight_decay: 0.01
+  nesterov: true
+
+# Data configuration
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "gpt2"
+
+  # Number of examples to load (null = all available)
+  max_examples: null  # Set to number like 100000 to limit dataset size
+
+  # Streaming vs pre-loading
+  use_streaming: false  # False = load into memory (faster but needs RAM)
+
+  # Workers
+  num_workers: 4
+
+# Mixed precision
+mixed_precision:
+  bf16: true
+
+# Weights & Biases logging
+wandb:
+  enabled: false  # Set to true to enable W&B
+  project: "moe-production"
+  run_name: "moe-500m-fineweb"
+  entity: null
+
+# Evaluation
+evaluation:
+  enabled: true
+  eval_steps: 100  # Number of steps for evaluation

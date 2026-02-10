@@ -32,6 +32,7 @@ class DolmaStreamingDataset(IterableDataset):
         split: str = "train",
         streaming: bool = True,
         vocab_size: Optional[int] = None,
+        use_dummy_if_no_split: bool = True,
     ):
         """
         Initialize streaming dataset.
@@ -52,19 +53,60 @@ class DolmaStreamingDataset(IterableDataset):
         self.streaming = streaming
         self.vocab_size = vocab_size if vocab_size is not None else tokenizer.vocab_size
 
-        # Try to load Dolma dataset
+        # Try to load dataset (prioritize datasets without deprecated loading scripts)
         try:
             from datasets import load_dataset
-            print(f"Loading Dolma dataset ({split}, streaming={streaming})...")
-            self.dataset = load_dataset(
-                "allenai/dolma",
-                split=split,
-                streaming=streaming,
-                trust_remote_code=True,
-            )
-            print(f"  ✓ Dolma dataset loaded")
+            print(f"Loading dataset ({split}, streaming={streaming})...")
+
+            # Try multiple datasets in order of preference
+            datasets_to_try = [
+                # FineWeb - large, high-quality, modern dataset
+                ("HuggingFaceFW/fineweb", {"name": "sample-10BT"}, "FineWeb-10BT sample"),
+                # FineWeb-Edu - filtered for educational content
+                ("HuggingFaceFW/fineweb-edu", {"name": "sample-10BT"}, "FineWeb-Edu sample"),
+                # OpenWebText - GPT-2 training data recreation
+                ("Skylion007/openwebtext", {}, "OpenWebText"),
+                # The Pile - diverse text dataset
+                ("monology/pile-uncopyrighted", {}, "The Pile (uncopyrighted)"),
+            ]
+
+            loaded = False
+            for dataset_name, kwargs, description in datasets_to_try:
+                try:
+                    print(f"  Trying {description}...")
+                    # Many datasets only have 'train' split - use it for validation too
+                    actual_split = split
+                    try:
+                        self.dataset = load_dataset(
+                            dataset_name,
+                            split=actual_split,
+                            streaming=streaming,
+                            **kwargs
+                        )
+                    except ValueError as e:
+                        if split == "validation" and "split" in str(e).lower():
+                            print(f"    No validation split, using train split instead...")
+                            actual_split = "train"
+                            self.dataset = load_dataset(
+                                dataset_name,
+                                split=actual_split,
+                                streaming=streaming,
+                                **kwargs
+                            )
+                        else:
+                            raise
+                    print(f"  ✓ {description} loaded successfully (split: {actual_split})")
+                    loaded = True
+                    break
+                except Exception as e:
+                    print(f"    Failed: {str(e)[:100]}")
+                    continue
+
+            if not loaded:
+                raise Exception("All dataset loading attempts failed")
+
         except Exception as e:
-            print(f"Warning: Could not load Dolma dataset: {e}")
+            print(f"Warning: Could not load any dataset: {e}")
             print(f"  Using dummy data for testing")
             self.dataset = None
 
@@ -97,12 +139,12 @@ class DolmaStreamingDataset(IterableDataset):
                 if not text:
                     continue
 
-                # Tokenize (no special tokens to maximize data usage)
-                tokens = self.tokenizer.encode(
+                # Tokenize (no truncation to get full text)
+                encoded = self.tokenizer.encode(
                     text,
-                    add_special_tokens=False,
                     truncation=False,
-                )["input_ids"]
+                )
+                tokens = encoded["input_ids"] if isinstance(encoded, dict) else encoded
 
                 # Skip if too short
                 if len(tokens) < self.seq_len + self.n_pred_tokens:

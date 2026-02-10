@@ -95,21 +95,32 @@ class CosineScheduleWithWarmup:
         self.current_step += 1
         lr = self.get_lr()
 
-        # Update optimizer learning rate while preserving relative ratios
-        # Store initial LR ratios on first call
-        if not hasattr(self, '_initial_lrs'):
-            self._initial_lrs = [group['lr'] for group in self.optimizer.param_groups]
-            self._lr_ratios = [initial_lr / self.max_lr for initial_lr in self._initial_lrs]
-
-        # Apply scheduled LR with preserved ratios
-        for param_group, ratio in zip(self.optimizer.param_groups, self._lr_ratios):
-            param_group['lr'] = lr * ratio
+        # Apply scheduled LR to ALL param groups
+        # (No ratio preservation - all groups get same scheduled LR)
+        self._last_lr = []
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+            self._last_lr.append(lr)
 
         return lr
 
+    def get_last_lr(self):
+        """
+        Return last computed learning rates (required by HuggingFace Trainer).
+
+        Returns:
+            List of learning rates for each parameter group
+        """
+        if not hasattr(self, '_last_lr'):
+            # If step() hasn't been called yet, return LR for step 1 (the first actual step)
+            # NOT step 0 (which would be warmup_init_lr = 0.0)
+            current_lr = self.get_lr(1)
+            return [current_lr] * len(self.optimizer.param_groups)
+        return self._last_lr
+
     def state_dict(self):
         """Get scheduler state for checkpointing."""
-        state = {
+        return {
             'current_step': self.current_step,
             'warmup_steps': self.warmup_steps,
             'max_steps': self.max_steps,
@@ -117,11 +128,6 @@ class CosineScheduleWithWarmup:
             'min_lr': self.min_lr,
             'warmup_init_lr': self.warmup_init_lr,
         }
-        # Save LR ratios if they've been computed
-        if hasattr(self, '_initial_lrs'):
-            state['_initial_lrs'] = self._initial_lrs
-            state['_lr_ratios'] = self._lr_ratios
-        return state
 
     def load_state_dict(self, state_dict):
         """Load scheduler state from checkpoint."""
@@ -131,10 +137,6 @@ class CosineScheduleWithWarmup:
         self.max_lr = state_dict['max_lr']
         self.min_lr = state_dict['min_lr']
         self.warmup_init_lr = state_dict['warmup_init_lr']
-        # Restore LR ratios if available
-        if '_initial_lrs' in state_dict:
-            self._initial_lrs = state_dict['_initial_lrs']
-            self._lr_ratios = state_dict['_lr_ratios']
 
 
 def get_lr_scheduler(
