@@ -12,7 +12,7 @@ model:
   max_seq_len: 2048
 
   # MoE configuration
-  n_experts: 32
+  n_experts: 64
   moe_top_k: 2
   moe_capacity_factor: 1.25
   d_ff_expert: 1024
@@ -46,7 +46,7 @@ model:
 # Training configuration
 training:
   # Total training tokens (10B for this example)
-  total_tokens: 10_000_000_000  # 10B tokens
+  total_tokens: 1_000_000_000  # 1B tokens
 
   # Batch configuration
   batch_size: 1
@@ -90,6 +90,10 @@ data:
 
   # Streaming vs pre-loading
   use_streaming: false  # False = load into memory (faster but needs RAM)
+
+  # Tokenization strategy
+  tokenize_on_fly: false  # True = tokenize during training (saves memory, slightly slower)
+                          # False = tokenize upfront (faster training, uses more memory)
 
   # Workers
   num_workers: 4

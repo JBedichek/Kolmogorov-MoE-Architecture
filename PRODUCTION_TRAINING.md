@@ -290,6 +290,54 @@ data:
   dataset_config: null
 ```
 
+### Tokenization Strategy
+
+**On-the-Fly vs Upfront Tokenization:**
+
+The training script supports two tokenization strategies:
+
+**1. Upfront Tokenization (Default - `tokenize_on_fly: false`):**
+```yaml
+data:
+  tokenize_on_fly: false
+```
+- Tokenizes the entire dataset before training starts
+- Faster training (no tokenization overhead during training)
+- Uses more memory (stores all tokenized sequences)
+- Best for: Smaller datasets that fit in RAM
+
+**2. On-the-Fly Tokenization (`tokenize_on_fly: true`):**
+```yaml
+data:
+  tokenize_on_fly: true
+```
+- Tokenizes text during training, batch by batch
+- More memory-efficient (only stores raw text)
+- Slightly slower per batch (tokenization happens during training)
+- Best for: Large datasets, memory-constrained systems
+
+**Memory Comparison:**
+
+For a 10B token dataset with 2048 sequence length:
+- Upfront: ~40-50GB RAM for tokenized data
+- On-the-fly: ~5-10GB RAM for raw text only
+
+**Performance:**
+- Upfront is typically 5-10% faster per step
+- On-the-fly allows training on much larger datasets
+- Choose based on your memory vs speed needs
+
+**Example Configuration:**
+```yaml
+# Memory-efficient for large datasets
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-350BT"  # Large 350B token dataset
+  tokenize_on_fly: true  # Save memory
+  use_streaming: false
+  max_examples: null
+```
+
 ## Interrupting and Resuming
 
 **Safe Interruption:**
@@ -324,6 +372,7 @@ python train_production.py --config configs/production_training.yaml \
 1. GPU utilization (`nvidia-smi`)
 2. Data loading workers (`num_workers: 4` in config)
 3. Using streaming vs pre-loading data
+4. Tokenization strategy (`tokenize_on_fly: false` is faster)
 
 ### "Checkpoints taking too much space"
 **Solution:**

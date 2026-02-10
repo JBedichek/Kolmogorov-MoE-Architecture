@@ -18,7 +18,7 @@ import argparse
 import yaml
 import os
 import torch
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling, GPT2TokenizerFast
 from datasets import load_dataset, Dataset
 from moe_arch.model.transformer import MoETransformer
@@ -31,6 +31,37 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+class OnTheFlyDataCollator:
+    """
+    Data collator that tokenizes text on-the-fly during training.
+
+    This is more memory-efficient than pre-tokenizing the entire dataset,
+    especially for large datasets, but may be slightly slower per batch.
+    """
+
+    def __init__(self, tokenizer, max_length: int):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        # Extract text from examples
+        texts = [example["text"] for example in examples]
+
+        # Tokenize on-the-fly
+        batch = self.tokenizer(
+            texts,
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt",
+        )
+
+        # For language modeling, labels are the same as input_ids
+        batch["labels"] = batch["input_ids"].clone()
+
+        return batch
 
 
 class MoEModelWrapper(torch.nn.Module):
@@ -102,11 +133,13 @@ class MoETrainer(Trainer):
 
 
 def load_and_prepare_dataset(config: dict, tokenizer, split: str = "train"):
-    """Load and tokenize dataset."""
+    """Load dataset and optionally tokenize it upfront."""
     data_config = config['data']
+    tokenize_on_fly = data_config.get('tokenize_on_fly', False)
 
     print(f"\nLoading {split} dataset...")
     print(f"  Dataset: {data_config['dataset_name']}")
+    print(f"  Tokenization: {'on-the-fly' if tokenize_on_fly else 'upfront'}")
 
     # Load dataset
     dataset = load_dataset(
@@ -127,8 +160,32 @@ def load_and_prepare_dataset(config: dict, tokenizer, split: str = "train"):
 
     print(f"  ✓ Dataset loaded")
 
-    # Tokenize
-    print(f"  Tokenizing...")
+    # If tokenizing on-the-fly, just filter empty texts and return
+    if tokenize_on_fly:
+        print(f"  Preparing for on-the-fly tokenization...")
+
+        # Filter empty texts
+        def has_text(example):
+            return example.get("text", "").strip() != ""
+
+        if data_config.get('use_streaming', False):
+            # For streaming, convert to list with filtering
+            print(f"  Converting streaming dataset to list...")
+            dataset_list = []
+            for item in dataset:
+                if has_text(item):
+                    dataset_list.append(item)
+                if max_examples and len(dataset_list) >= max_examples:
+                    break
+            dataset = Dataset.from_list(dataset_list)
+        else:
+            dataset = dataset.filter(has_text)
+
+        print(f"  ✓ {len(dataset):,} examples ready for on-the-fly tokenization")
+        return dataset
+
+    # Otherwise, tokenize upfront (original behavior)
+    print(f"  Tokenizing upfront...")
 
     def tokenize_function(examples):
         return tokenizer(
@@ -166,7 +223,7 @@ def load_and_prepare_dataset(config: dict, tokenizer, split: str = "train"):
         # Filter empty sequences for non-streaming
         tokenized = tokenized.filter(lambda x: len(x['input_ids']) > 0)
 
-    print(f"  ✓ {len(tokenized):,} examples ready")
+    print(f"  ✓ {len(tokenized):,} examples tokenized")
 
     return tokenized
 
@@ -311,11 +368,20 @@ def main():
     print(f"  Save interval: {train_config['save_interval']} steps")
     print(f"  Log interval: {train_config['log_interval']} steps")
 
-    # Data collator
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
+    # Data collator (choose based on tokenization strategy)
+    tokenize_on_fly = config['data'].get('tokenize_on_fly', False)
+    if tokenize_on_fly:
+        print(f"\nUsing on-the-fly tokenization data collator")
+        data_collator = OnTheFlyDataCollator(
+            tokenizer=tokenizer,
+            max_length=model_config.max_seq_len,
+        )
+    else:
+        print(f"\nUsing standard data collator (pre-tokenized)")
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=tokenizer,
+            mlm=False,
+        )
 
     # LR config for custom scheduler
     lr_config = {
