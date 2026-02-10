@@ -65,11 +65,19 @@ class MoDRouter(nn.Module):
         """
         batch_size, seq_len, d_model = hidden_states.shape
 
+        # Handle empty sequences (can happen with padding)
+        if seq_len == 0:
+            empty_mask = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=torch.bool)
+            empty_indices = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=torch.long)
+            empty_scores = torch.zeros(batch_size, 0, device=hidden_states.device)
+            return empty_mask, empty_indices, empty_scores
+
         # Compute importance scores for each token
         scores = self.scorer(hidden_states).squeeze(-1)  # (batch, seq_len)
 
         # Determine number of tokens to select per sequence
-        k = max(1, int(seq_len * self.capacity_factor))
+        # Clamp k to never exceed seq_len (handles short/padded sequences)
+        k = max(1, min(seq_len, int(seq_len * self.capacity_factor)))
 
         # Select top-k tokens per sequence
         topk_scores, topk_indices = torch.topk(scores, k, dim=-1)  # Each: (batch, k)
