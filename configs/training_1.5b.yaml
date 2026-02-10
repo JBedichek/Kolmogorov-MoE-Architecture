@@ -22,13 +22,13 @@ model:
   moe_layers: [2, 3, 6, 7, 10, 11, 14, 15, 18, 19]  # 10 MoE layers
 
   # MoD configuration
-  mod_enabled: true  # Disabled
+  mod_enabled: false  # Disabled
   mod_capacity_factor: 0.75
   mod_router_hidden_dim: 128
   mod_load_balance_loss_weight: 0.01
 
   # Mamba configuration
-  mamba_enabled: true
+  mamba_enabled: false
   ssm_state_dim: 16
   ssm_expansion: 2
   mamba_layers: [5, 9, 13, 17]  # 4 Mamba layers
@@ -52,7 +52,7 @@ training:
   batch_size: 1
   gradient_accumulation_steps: 4
 
-  max_lr: 0.0003  # Lower for AdamW (use 0.001 for Muon)
+  max_lr: 0.001  # Muon optimizer requires higher LR than AdamW
   min_lr_ratio: 0.1
   warmup_steps: 100  # Reduced from 2000
 

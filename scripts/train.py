@@ -36,7 +36,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training_3b.yaml",
+        default="configs/training_1.5b.yaml",
         help="Path to training config file",
     )
     parser.add_argument(
@@ -112,9 +112,10 @@ def main():
     model = MoETransformer(model_config)
     model = model.to(args.device)
 
-    # Cast model to BF16 for memory efficiency (50% reduction in model memory)
-    model = model.to(dtype=torch.bfloat16)
-    print("  ✓ Model weights in BF16 (saves ~50% model memory)")
+    # Keep model in FP32 for optimizer precision
+    # Autocast in trainer.py handles BF16 compute (forward pass only)
+    # This prevents BFloat16 underflow on small parameter updates (e.g., norms at 1.0)
+    print("  ✓ Model weights in FP32 (autocast handles BF16 compute)")
 
     # Count parameters
     params = model.count_parameters()
