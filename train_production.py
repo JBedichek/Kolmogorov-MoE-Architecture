@@ -116,11 +116,15 @@ class MoETrainer(Trainer):
         return self.lr_scheduler
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """Compute loss with empty sequence protection."""
+        """Compute loss with empty sequence protection and attention mask support."""
         model_inputs = {
             'input_ids': inputs['input_ids'],
             'labels': inputs['labels'] if 'labels' in inputs else inputs['input_ids'],
         }
+
+        # Pass attention_mask if available (critical for ignoring padding tokens!)
+        if 'attention_mask' in inputs:
+            model_inputs['attention_mask'] = inputs['attention_mask']
 
         # Skip empty sequences
         if model_inputs['input_ids'].shape[1] == 0:

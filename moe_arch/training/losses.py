@@ -47,6 +47,7 @@ class MultiTokenPredictionLoss(nn.Module):
         self,
         logits_list: List[torch.Tensor],
         labels: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute multi-token prediction loss.
@@ -56,6 +57,7 @@ class MultiTokenPredictionLoss(nn.Module):
                         [logits_t1, logits_t2, logits_t3, logits_t4]
                         where logits_ti predicts token at position t+i
             labels: (batch, seq_len) - ground truth token IDs
+            attention_mask: (batch, seq_len) - Optional attention mask (1 for real tokens, 0 for padding)
 
         Returns:
             total_loss: Weighted sum of all prediction losses
@@ -78,6 +80,8 @@ class MultiTokenPredictionLoss(nn.Module):
                 # Standard next-token prediction (t+1)
                 shift_logits = logits[:, :-1, :].contiguous()
                 shift_labels = labels[:, 1:].contiguous()
+                # Shift attention mask too (if provided)
+                shift_mask = attention_mask[:, 1:].contiguous() if attention_mask is not None else None
             else:
                 # Multi-token ahead prediction (t+2, t+3, etc.)
                 # Need to ensure we don't go beyond sequence length
@@ -89,6 +93,13 @@ class MultiTokenPredictionLoss(nn.Module):
 
                 shift_logits = logits[:, :-i-1, :].contiguous()
                 shift_labels = labels[:, i+1:].contiguous()
+                shift_mask = attention_mask[:, i+1:].contiguous() if attention_mask is not None else None
+
+            # Apply attention mask to labels if provided
+            # Set padding positions to ignore_index so they don't contribute to loss
+            if shift_mask is not None:
+                # Where mask is 0 (padding), set label to ignore_index
+                shift_labels = shift_labels.masked_fill(shift_mask == 0, self.ignore_index)
 
             # Compute cross-entropy loss
             loss = F.cross_entropy(

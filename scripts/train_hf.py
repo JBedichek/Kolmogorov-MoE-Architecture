@@ -134,6 +134,10 @@ class MoETrainer(Trainer):
             'labels': inputs['labels'] if 'labels' in inputs else inputs['input_ids'],
         }
 
+        # Pass attention_mask if available (critical for ignoring padding tokens!)
+        if 'attention_mask' in inputs:
+            model_inputs['attention_mask'] = inputs['attention_mask']
+
         # CRITICAL: Skip empty sequences (can cause NaN loss)
         seq_len = model_inputs['input_ids'].shape[1]
         if seq_len == 0:

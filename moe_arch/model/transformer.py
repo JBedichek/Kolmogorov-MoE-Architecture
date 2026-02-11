@@ -178,9 +178,9 @@ class MoETransformer(nn.Module):
         multitoken_loss_dict = {}
 
         if labels is not None:
-            # Compute multi-token prediction loss
+            # Compute multi-token prediction loss with attention mask
             multitoken_loss, multitoken_loss_dict = self.multitoken_loss(
-                logits_list, labels
+                logits_list, labels, attention_mask=attention_mask
             )
             lm_loss = multitoken_loss
 
