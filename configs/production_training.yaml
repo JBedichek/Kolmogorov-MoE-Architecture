@@ -92,7 +92,7 @@ data:
   use_streaming: false  # False = load into memory (faster but needs RAM)
 
   # Tokenization strategy
-  tokenize_on_fly: false  # True = tokenize during training (saves memory, slightly slower)
+  tokenize_on_fly: true  # True = tokenize during training (saves memory, slightly slower)
                           # False = tokenize upfront (faster training, uses more memory)
 
   # Workers

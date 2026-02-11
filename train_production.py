@@ -19,7 +19,7 @@ import yaml
 import os
 import torch
 from typing import Optional, Dict, List, Any
-from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling, GPT2TokenizerFast
+from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling, GPT2TokenizerFast, TrainerCallback
 from datasets import load_dataset, Dataset
 from moe_arch.model.transformer import MoETransformer
 from moe_arch.model.config import AdvancedMoEConfig
@@ -31,6 +31,39 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+class TrueLossLoggingCallback(TrainerCallback):
+    """
+    Callback to log the TRUE per-sample loss alongside HF Trainer's accumulated loss.
+
+    HuggingFace Trainer logs the SUM of losses over gradient_accumulation_steps,
+    which can be confusing. This callback divides by gradient_accumulation_steps
+    to show the actual per-sample loss.
+    """
+
+    def __init__(self, gradient_accumulation_steps: int):
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Called when logging occurs."""
+        if logs is not None and 'loss' in logs:
+            # Calculate true per-sample loss
+            accumulated_loss = logs['loss']
+            true_loss = accumulated_loss / self.gradient_accumulation_steps
+
+            # Add to logs
+            logs['true_loss'] = true_loss
+            logs['accumulated_loss'] = accumulated_loss
+
+            # Print helpful message on first log
+            if state.global_step <= args.logging_steps:
+                print(f"\n{'='*80}")
+                print(f"LOSS LOGGING EXPLANATION:")
+                print(f"  - 'loss': {accumulated_loss:.4f} (sum over {self.gradient_accumulation_steps} gradient accumulation steps)")
+                print(f"  - 'true_loss': {true_loss:.4f} (actual per-sample loss)")
+                print(f"  - Monitor 'true_loss' to track training progress!")
+                print(f"{'='*80}\n")
 
 
 class OnTheFlyDataCollator:
@@ -392,6 +425,11 @@ def main():
         'min_lr_ratio': train_config.get('min_lr_ratio', 0.1),
     }
 
+    # Create callback to log true per-sample loss
+    true_loss_callback = TrueLossLoggingCallback(
+        gradient_accumulation_steps=grad_accum
+    )
+
     # Create trainer
     print("\nInitializing trainer...")
     trainer = MoETrainer(
@@ -402,8 +440,13 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        callbacks=[true_loss_callback],
     )
     print("  ✓ Trainer created")
+    print(f"\nIMPORTANT: Loss logging with gradient_accumulation_steps={grad_accum}")
+    print(f"  - HF Trainer logs 'loss' as SUM over {grad_accum} accumulation steps")
+    print(f"  - Callback will also log 'true_loss' = loss / {grad_accum}")
+    print(f"  - Monitor 'true_loss' to see actual per-sample loss!")
 
     # Resume from checkpoint
     resume_from_checkpoint = args.resume or train_config.get('resume_from')
