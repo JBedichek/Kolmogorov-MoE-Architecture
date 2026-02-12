@@ -81,12 +81,10 @@ class TransformerBlock(nn.Module):
                 config.dropout,
             )
 
-        # MoD routers (if enabled)
+        # MoD router for FFN only (attention needs full context, can't skip)
         if self.use_mod:
-            self.seq_mod_router = MoDRouter(config)
             self.ffn_mod_router = MoDRouter(config)
         else:
-            self.seq_mod_router = None
             self.ffn_mod_router = None
 
         # Residual dropout
@@ -100,6 +98,7 @@ class TransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        return_aux_loss: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass of transformer block.
@@ -108,9 +107,11 @@ class TransformerBlock(nn.Module):
             hidden_states: (batch, seq_len, d_model)
             attention_mask: Optional attention mask
             position_ids: Optional position IDs for RoPE
+            return_aux_loss: If True, return (hidden_states, aux_loss) tuple.
+                           Used with activation checkpointing to maintain gradient flow.
 
         Returns:
-            output: (batch, seq_len, d_model)
+            output: (batch, seq_len, d_model) or tuple of (output, aux_loss)
         """
         batch_size, seq_len, d_model = hidden_states.shape
         total_aux_loss = 0.0
@@ -119,46 +120,17 @@ class TransformerBlock(nn.Module):
         residual = hidden_states
         hidden_states = self.seq_norm(hidden_states)
 
-        # Apply MoD if enabled
-        if self.use_mod and self.training:
-            # Route tokens for sequence layer
-            selected_mask, selected_indices, scores = self.seq_mod_router(hidden_states)
-            total_aux_loss += self.seq_mod_router.aux_loss
-
-            # Gather selected tokens
-            selected_tokens = torch.gather(
-                hidden_states,
-                1,
-                selected_indices.unsqueeze(-1).expand(-1, -1, d_model),
-            )
-
-            # Process selected tokens
-            if self.use_mamba:
-                seq_output_selected = self.seq_layer(selected_tokens)
-            else:
-                seq_output_selected = self.seq_layer(
-                    selected_tokens,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                )
-
-            # Scatter back (ensure dtype matches for mixed precision)
-            seq_output = residual.clone()
-            seq_output.scatter_(
-                1,
-                selected_indices.unsqueeze(-1).expand(-1, -1, d_model),
-                seq_output_selected.to(seq_output.dtype),
-            )
+        # NOTE: MoD is NOT applied to attention/Mamba because:
+        # 1. Attention requires full context for proper causal masking
+        # 2. MoD only provides compute savings for token-independent ops (FFN/MoE)
+        if self.use_mamba:
+            seq_output = self.seq_layer(hidden_states)
         else:
-            # Process all tokens (no MoD)
-            if self.use_mamba:
-                seq_output = self.seq_layer(hidden_states)
-            else:
-                seq_output = self.seq_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                )
+            seq_output = self.seq_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
 
         seq_output = self.residual_dropout(seq_output)
         hidden_states = residual + seq_output
@@ -171,31 +143,48 @@ class TransformerBlock(nn.Module):
         residual = hidden_states
         hidden_states = self.ffn_norm(hidden_states)
 
-        # Apply MoD if enabled
+        # Apply MoD if enabled - implementation following the paper:
+        # "Mixture-of-Depths: Dynamically allocating compute in transformer-based language models"
         if self.use_mod and self.training:
             # Route tokens for FFN layer
-            selected_mask, selected_indices, scores = self.ffn_mod_router(hidden_states)
-            total_aux_loss += self.ffn_mod_router.aux_loss
+            # Returns: sorted indices (for causality), softmax weights (for gradient flow),
+            #          raw logits (for aux loss), original topk indices
+            sorted_indices, router_weights, router_logits, topk_indices = self.ffn_mod_router(hidden_states)
+            total_aux_loss = total_aux_loss + self.ffn_mod_router.aux_loss
 
-            # Gather selected tokens
+            # PROPER MoD: Only process selected tokens (saves compute!)
+            # sorted_indices: (batch, k) where k = seq_len * capacity_factor
+            k = sorted_indices.shape[1]
+
+            # Gather selected tokens for FFN processing
+            indices_expanded = sorted_indices.unsqueeze(-1).expand(-1, -1, d_model)
             selected_tokens = torch.gather(
                 hidden_states,
-                1,
-                selected_indices.unsqueeze(-1).expand(-1, -1, d_model),
-            )
+                dim=1,
+                index=indices_expanded,
+            )  # (batch, k, d_model)
 
-            # Process selected tokens
-            ffn_output_selected = self.ffn(selected_tokens)
+            # Process only selected tokens through FFN/MoE
+            # This is where we save compute - processing k tokens instead of seq_len
+            processed_tokens = self.ffn(selected_tokens)  # (batch, k, d_model)
 
-            # Scatter back (ensure dtype matches for mixed precision)
-            ffn_output = residual.clone()
-            ffn_output.scatter_(
-                1,
-                selected_indices.unsqueeze(-1).expand(-1, -1, d_model),
-                ffn_output_selected.to(ffn_output.dtype),
+            # ===== KEY: Multiply output by router weights (as per paper) =====
+            # "we multiply the output of the function f by the router weights.
+            #  This puts the router weights along the 'gradient path'"
+            # router_weights are already softmaxed over the k selected tokens
+            weighted_output = router_weights.unsqueeze(-1) * processed_tokens  # (batch, k, d_model)
+
+            # Use scatter_add to add weighted output back to original positions
+            # This implements: output = input + weighted_processed for selected tokens
+            #                  output = input for non-selected tokens (residual only)
+            ffn_output = torch.zeros_like(hidden_states)
+            ffn_output.scatter_add_(
+                dim=1,
+                index=indices_expanded,
+                src=weighted_output,
             )
         else:
-            # Process all tokens (no MoD)
+            # Process all tokens (no MoD or inference)
             ffn_output = self.ffn(hidden_states)
 
         ffn_output = self.residual_dropout(ffn_output)
@@ -205,8 +194,17 @@ class TransformerBlock(nn.Module):
         if self.use_moe and hasattr(self.ffn, 'aux_loss') and self.training:
             total_aux_loss += self.ffn.aux_loss
 
-        # Store total auxiliary loss
+        # Store total auxiliary loss (for non-checkpointing path)
         self.aux_loss = total_aux_loss if self.training else 0.0
+
+        # Return aux_loss as tensor if requested (for activation checkpointing)
+        if return_aux_loss and self.training:
+            # Convert to tensor if needed for proper gradient tracking
+            if isinstance(total_aux_loss, (int, float)):
+                aux_tensor = torch.tensor(total_aux_loss, device=hidden_states.device, dtype=hidden_states.dtype)
+            else:
+                aux_tensor = total_aux_loss
+            return hidden_states, aux_tensor
 
         return hidden_states
 

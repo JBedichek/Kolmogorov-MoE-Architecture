@@ -22,9 +22,18 @@ class MoDRouter(nn.Module):
     Learns to score each token and selects top-k% for processing.
     Tokens not selected skip the layer computation (residual only).
 
+    Implementation follows the paper:
+    "Mixture-of-Depths: Dynamically allocating compute in transformer-based language models"
+    (Raposo et al., 2024)
+
+    Key design choices from paper:
+    - Router is a simple linear projection (not MLP)
+    - Output is multiplied by softmax of router weights (puts router in gradient path)
+    - Auxiliary loss uses binary cross-entropy for causality fix
+
     Benefits:
     - Adaptive depth: important tokens get more processing
-    - Compute savings: ~25% reduction with capacity_factor=0.75
+    - Compute savings: ~87.5% reduction with capacity_factor=0.125 (paper's optimal)
     - Complements MoE: MoD handles "which tokens", MoE handles "which experts"
     """
 
@@ -33,17 +42,24 @@ class MoDRouter(nn.Module):
         self.config = config
         self.d_model = config.d_model
         self.capacity_factor = config.mod_capacity_factor
-        self.hidden_dim = config.mod_router_hidden_dim
 
-        # Scoring network: d_model -> hidden -> 1
-        self.scorer = nn.Sequential(
-            nn.Linear(config.d_model, self.hidden_dim, bias=False),
+        # Router: simple linear projection (as per paper)
+        # "the router weight for a given token embedding is a scalar produced
+        #  as a result of a linear projection r_i = w^T x_i"
+        self.router = nn.Linear(config.d_model, 1, bias=False)
+
+        # Auxiliary router for causality fix (small MLP)
+        # Used during training to predict which tokens will be selected
+        # This helps with autoregressive sampling where we can't use top-k
+        aux_hidden = config.mod_router_hidden_dim
+        self.aux_router = nn.Sequential(
+            nn.Linear(config.d_model, aux_hidden, bias=False),
             nn.SiLU(),
-            nn.Linear(self.hidden_dim, 1, bias=False),
+            nn.Linear(aux_hidden, 1, bias=False),
         )
 
-        # Load balancing loss weight
-        self.load_balance_loss_weight = config.mod_load_balance_loss_weight
+        # Loss weights
+        self.aux_loss_weight = config.mod_load_balance_loss_weight
 
         # Track auxiliary loss
         self.aux_loss = 0.0
@@ -51,7 +67,7 @@ class MoDRouter(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute which tokens should be processed through the layer.
 
@@ -59,75 +75,100 @@ class MoDRouter(nn.Module):
             hidden_states: (batch, seq_len, d_model)
 
         Returns:
-            selected_mask: (batch, seq_len) - binary mask of selected tokens
-            selected_indices: (batch, k) - indices of selected tokens (for gathering)
-            scores: (batch, seq_len) - token importance scores (for loss)
+            selected_indices: (batch, k) - indices of selected tokens (sorted for causality)
+            router_weights: (batch, k) - softmax weights for selected tokens (for gradient flow)
+            router_logits: (batch, seq_len) - raw router scores (for aux loss)
+            topk_indices: (batch, k) - original unsorted indices (for aux loss target)
         """
         batch_size, seq_len, d_model = hidden_states.shape
 
         # Handle empty sequences (can happen with padding)
         if seq_len == 0:
-            empty_mask = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=torch.bool)
             empty_indices = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=torch.long)
-            empty_scores = torch.zeros(batch_size, 0, device=hidden_states.device)
-            return empty_mask, empty_indices, empty_scores
+            empty_weights = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=hidden_states.dtype)
+            empty_logits = torch.zeros(batch_size, 0, device=hidden_states.device, dtype=hidden_states.dtype)
+            return empty_indices, empty_weights, empty_logits, empty_indices
 
-        # Compute importance scores for each token
-        scores = self.scorer(hidden_states).squeeze(-1)  # (batch, seq_len)
+        # Compute router logits (scalar per token)
+        router_logits = self.router(hidden_states).squeeze(-1)  # (batch, seq_len)
 
         # Determine number of tokens to select per sequence
         # Clamp k to never exceed seq_len (handles short/padded sequences)
         k = max(1, min(seq_len, int(seq_len * self.capacity_factor)))
 
         # Select top-k tokens per sequence
-        topk_scores, topk_indices = torch.topk(scores, k, dim=-1)  # Each: (batch, k)
+        topk_logits, topk_indices = torch.topk(router_logits, k, dim=-1)  # Each: (batch, k)
 
-        # Create binary mask for selected tokens
-        selected_mask = torch.zeros(
-            batch_size, seq_len,
-            device=hidden_states.device,
-            dtype=torch.bool,
-        )
-        selected_mask.scatter_(1, topk_indices, True)
+        # Sort selected indices for causal consistency
+        # (ensures tokens are processed in order, important for attention)
+        sorted_indices, sort_order = torch.sort(topk_indices, dim=-1)
 
-        # Compute auxiliary loss
+        # Reorder the logits according to sorted indices
+        sorted_logits = torch.gather(topk_logits, dim=-1, index=sort_order)
+
+        # Apply softmax to get router weights (as per paper)
+        # "we multiply the output of the function f by the router weights"
+        # This puts router weights in the gradient path
+        router_weights = F.softmax(sorted_logits, dim=-1)  # (batch, k)
+
+        # Compute auxiliary loss for causality fix
         if self.training:
-            self.aux_loss = self._compute_load_balance_loss(scores, selected_mask)
+            self.aux_loss = self._compute_auxiliary_loss(
+                hidden_states, router_logits, topk_indices
+            )
         else:
             self.aux_loss = 0.0
 
-        return selected_mask, topk_indices, scores
+        return sorted_indices, router_weights, router_logits, topk_indices
 
-    def _compute_load_balance_loss(
+    def _compute_auxiliary_loss(
         self,
-        scores: torch.Tensor,
-        selected_mask: torch.Tensor,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        topk_indices: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Load balancing loss to encourage diverse token selection.
+        Auxiliary loss for causality fix (as per paper Section 3.5).
 
-        Encourages the router to select different tokens across the sequence,
-        preventing it from always selecting the same positions.
+        Uses a small auxiliary MLP to predict whether each token will be selected.
+        This is trained with binary cross-entropy where:
+        - Targets: 1 if token was among top-k, 0 otherwise
+        - Predictions: auxiliary router output
+
+        The auxiliary router receives inputs with stop_gradient to avoid
+        interfering with the main routing decisions.
 
         Args:
-            scores: (batch, seq_len) - token importance scores
-            selected_mask: (batch, seq_len) - binary mask of selected tokens
+            hidden_states: (batch, seq_len, d_model) - input embeddings
+            router_logits: (batch, seq_len) - main router outputs (unused here)
+            topk_indices: (batch, k) - indices of selected tokens
 
         Returns:
-            loss: scalar
+            loss: scalar (differentiable w.r.t. auxiliary router)
         """
-        # Compute selection probability per position (averaged across batch)
-        # This encourages the router to not always select the same positions
-        selection_prob = selected_mask.float().mean(dim=0)  # (seq_len,)
+        batch_size, seq_len, d_model = hidden_states.shape
+        k = topk_indices.shape[1]
 
-        # Ideal uniform distribution
-        target_prob = self.capacity_factor
+        # Create binary targets: 1 for selected tokens, 0 otherwise
+        targets = torch.zeros(
+            batch_size, seq_len,
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        targets.scatter_(1, topk_indices, 1.0)
 
-        # L2 loss: encourage uniform selection across positions
-        # This prevents the router from always selecting beginning/end tokens
-        loss = ((selection_prob - target_prob) ** 2).mean()
+        # Auxiliary router predicts selection (with stop gradient on input)
+        # "receives the same inputs as the router (with a stop gradient)"
+        aux_logits = self.aux_router(hidden_states.detach()).squeeze(-1)  # (batch, seq_len)
 
-        return self.load_balance_loss_weight * loss
+        # Binary cross-entropy loss
+        # "a binary cross-entropy loss wherein the router's outputs provide the logits,
+        #  and the top-k selections provide the targets"
+        aux_loss = F.binary_cross_entropy_with_logits(
+            aux_logits, targets, reduction='mean'
+        )
+
+        return self.aux_loss_weight * aux_loss
 
 
 class MoDLayer(nn.Module):

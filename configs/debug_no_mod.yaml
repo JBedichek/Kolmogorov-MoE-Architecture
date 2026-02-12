@@ -1,0 +1,89 @@
+# Debug config - MoD DISABLED to isolate the problem
+# If loss decreases with this config, MoD is the issue
+# If loss still plateaus, problem is elsewhere (MoE, data, LR, etc.)
+
+model:
+  vocab_size: 128256
+  d_model: 1024
+  n_layers: 18
+  n_heads: 8
+  n_kv_heads: 4
+  head_dim: 128
+  d_ff: 5504
+  max_seq_len: 1024  # Reduced for memory
+
+  # MoE - keep this
+  n_experts: 32
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 3096
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  moe_implementation: "batched"
+
+  # MoD - DISABLED for debugging
+  mod_enabled: false
+  mod_capacity_factor: 1.0
+  mod_router_hidden_dim: 64
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba - disabled
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Single token prediction
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Standard settings
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+training:
+  total_tokens: 1_000_000_000
+  batch_size: 1
+  gradient_accumulation_steps: 16
+
+  # Conservative learning rate
+  max_lr: 0.0003
+  min_lr_ratio: 0.1
+  warmup_steps: 500
+
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  checkpoint_dir: "./checkpoints_debug"
+  save_interval: 500
+  log_interval: 10
+  eval_interval: 250
+  resume_from: null
+
+optimizer:
+  type: "muon"  # Use AdamW instead of Muon for debugging
+  weight_decay: 0.01
+
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "meta-llama/Meta-Llama-3-8B"
+  max_examples: 100000  # Smaller for faster iteration
+  use_streaming: false
+  tokenize_on_fly: true
+  num_workers: 4
+  use_document_attention_mask: false
+
+mixed_precision:
+  bf16: true
+  fp8: false
+
+wandb:
+  enabled: false
+
+evaluation:
+  enabled: false

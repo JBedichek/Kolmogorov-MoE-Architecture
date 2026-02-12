@@ -68,8 +68,11 @@ class MoETransformer(nn.Module):
             for _ in range(config.n_pred_tokens)
         ])
 
-        # Optionally tie first head with token embeddings for weight sharing
-        # self.lm_heads[0].weight = self.token_embedding.embedding.weight
+        # Tie first head with token embeddings for weight sharing
+        # This reduces parameters by vocab_size * d_model and improves training
+        self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
+        if self.tie_word_embeddings:
+            self.lm_heads[0].weight = self.token_embedding.embedding.weight
 
         # Multi-token prediction loss module
         self.multitoken_loss = MultiTokenPredictionLoss(
@@ -87,6 +90,9 @@ class MoETransformer(nn.Module):
         print(f"Initialized MoETransformer with {n_params/1e9:.2f}B parameters")
         print(f"  Active parameters: {n_active/1e9:.2f}B ({sparsity:.1%} sparsity)")
         print(f"  Multi-token prediction: {config.n_pred_tokens} heads")
+        if self.tie_word_embeddings:
+            tied_params = config.vocab_size * config.d_model
+            print(f"  Weight tying: lm_head[0] tied with embeddings (saves {tied_params/1e6:.1f}M params)")
 
     def _init_weights(self, module):
         """Initialize weights following best practices."""
@@ -104,6 +110,16 @@ class MoETransformer(nn.Module):
     def gradient_checkpointing_disable(self):
         """Disable gradient checkpointing."""
         self.gradient_checkpointing = False
+
+    @staticmethod
+    def _checkpointed_layer_forward(layer, hidden_states, attention_mask, position_ids):
+        """
+        Helper for activation checkpointing that returns aux_loss.
+
+        This is a static method to avoid capturing self in the checkpoint,
+        which could cause issues with FSDP.
+        """
+        return layer(hidden_states, attention_mask, position_ids, return_aux_loss=True)
 
     def forward(
         self,
@@ -141,23 +157,28 @@ class MoETransformer(nn.Module):
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
                 # Use gradient checkpointing to save memory
+                # IMPORTANT: Return aux_loss from layer to maintain gradient flow
+                # With checkpointing, layer.aux_loss would be disconnected from backward pass
                 from torch.utils.checkpoint import checkpoint
-                hidden_states = checkpoint(
+
+                hidden_states, aux_loss = checkpoint(
+                    self._checkpointed_layer_forward,
                     layer,
                     hidden_states,
                     attention_mask,
                     position_ids,
                     use_reentrant=False,
                 )
+                total_aux_loss = total_aux_loss + aux_loss
             else:
                 hidden_states = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                 )
-            # Accumulate auxiliary losses from MoE layers
-            if self.training and hasattr(layer, 'aux_loss'):
-                total_aux_loss += layer.aux_loss
+                # Accumulate auxiliary losses from MoE layers
+                if self.training and hasattr(layer, 'aux_loss'):
+                    total_aux_loss = total_aux_loss + layer.aux_loss
 
         # Final normalization
         hidden_states = self.final_norm(hidden_states)
@@ -336,26 +357,38 @@ class MoETransformer(nn.Module):
             # FFN layer
             active_params += sum(p.numel() for p in layer.ffn_norm.parameters())
 
-            if layer.use_moe and hasattr(layer.ffn, 'experts'):
+            if layer.use_moe:
                 # MoE layer: only top-k experts active per token
-                # Router is always active
-                if hasattr(layer.ffn, 'router'):
-                    active_params += sum(p.numel() for p in layer.ffn.router.parameters())
+                # Handle different MoE implementations
+                if hasattr(layer.ffn, '_use_expert_parallel') and layer.ffn._use_expert_parallel:
+                    # Expert parallel: router and experts inside expert_parallel_layer
+                    ep_layer = layer.ffn.expert_parallel_layer
+                    active_params += sum(p.numel() for p in ep_layer.router.parameters())
+                    # Only local experts on this GPU, scaled by top_k/n_experts
+                    expert_params = sum(p.numel() for p in ep_layer.local_experts.parameters())
+                    active_expert_params = int(expert_params * (self.config.moe_top_k / ep_layer.n_local_experts))
+                    active_params += active_expert_params
+                else:
+                    # Standard MoE: router and grouped_experts
+                    if hasattr(layer.ffn, 'router') and layer.ffn.router is not None:
+                        active_params += sum(p.numel() for p in layer.ffn.router.parameters())
 
-                # Expert parameters: only top-k/n_experts fraction active
-                expert_params = sum(p.numel() for p in layer.ffn.experts.parameters())
-                active_expert_params = int(expert_params * (self.config.moe_top_k / self.config.n_experts))
-                active_params += active_expert_params
+                    # Expert parameters: only top-k/n_experts fraction active
+                    if hasattr(layer.ffn, 'grouped_experts') and layer.ffn.grouped_experts is not None:
+                        expert_params = sum(p.numel() for p in layer.ffn.grouped_experts.parameters())
+                    elif hasattr(layer.ffn, 'experts') and layer.ffn.experts is not None:
+                        expert_params = sum(p.numel() for p in layer.ffn.experts.parameters())
+                    else:
+                        expert_params = 0
+                    active_expert_params = int(expert_params * (self.config.moe_top_k / self.config.n_experts))
+                    active_params += active_expert_params
             else:
                 # Standard FFN: all parameters active
                 active_params += sum(p.numel() for p in layer.ffn.parameters())
 
-            # MoD routers (if enabled) - always active
-            if layer.use_mod:
-                if layer.seq_mod_router is not None:
-                    active_params += sum(p.numel() for p in layer.seq_mod_router.parameters())
-                if layer.ffn_mod_router is not None:
-                    active_params += sum(p.numel() for p in layer.ffn_mod_router.parameters())
+            # MoD router for FFN (if enabled) - always active
+            if layer.use_mod and layer.ffn_mod_router is not None:
+                active_params += sum(p.numel() for p in layer.ffn_mod_router.parameters())
 
             # Dropout (no parameters)
 

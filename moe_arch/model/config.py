@@ -35,6 +35,11 @@ class AdvancedMoEConfig:
     moe_capacity_factor: float = 1.25  # Overflow handling capacity
     moe_load_balance_loss_weight: float = 0.01
     moe_router_z_loss_weight: float = 0.001
+    # MoE implementation type:
+    # - "batched": Padded batched bmm (default, fastest for small expert count)
+    # - "sparse": True sparse computation (no padding waste, better for many experts)
+    # - "expert_parallel": Distributed experts across GPUs (for multi-GPU training)
+    moe_implementation: str = "batched"
     # Layers that use MoE (0-indexed)
     # Pattern: layers 2, 3, 6, 7, 9, 10, 11, 14, 15, 17, 18, 19, 22, 23, 25, 26, 27, 30, 31
     # Note: Layers 9, 17, 25 are Mamba layers that will use RoutingMamba (RoM)
@@ -86,6 +91,9 @@ class AdvancedMoEConfig:
 
     # ===== Flash Attention =====
     use_flash_attention: bool = True
+
+    # ===== Weight Tying =====
+    tie_word_embeddings: bool = True  # Tie lm_head[0] weights with token embeddings
 
     # ===== Device =====
     device: str = "cuda"

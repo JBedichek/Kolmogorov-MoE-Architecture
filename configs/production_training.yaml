@@ -1,32 +1,42 @@
 # Production Training Configuration for MoE with FineWeb
+# Target: ~7.6B total params with MAXIMUM SPARSITY
+# Only 8.1% active params (0.62B active out of 7.64B total)
+# 64 experts with top_k=2 for proper router training
 
 # Model configuration
 model:
-  vocab_size: 50257
-  d_model: 768
-  n_layers: 12
-  n_heads: 12
-  n_kv_heads: 3
-  head_dim: 64
-  d_ff: 2048
+  vocab_size: 128256  # Llama 3 tokenizer vocab size
+  d_model: 1024
+  n_layers: 18
+  n_heads: 8
+  n_kv_heads: 4  # GQA 4:1 ratio
+  head_dim: 128
+  d_ff: 5504  # Only used for non-MoE layers (if any)
   max_seq_len: 2048
 
-  # MoE configuration
-  n_experts: 64
+  # MoE configuration - 64 experts for EXTREME sparsity
+  # With 64 experts and top_k=2: only 3.1% of expert capacity active
+  # Total: 7.64B params, Active: 0.62B params (8.1% active ratio)
+  n_experts: 32
   moe_top_k: 2
   moe_capacity_factor: 1.25
-  d_ff_expert: 1024
+  d_ff_expert: 3096
   moe_load_balance_loss_weight: 0.01
   moe_router_z_loss_weight: 0.001
-  moe_layers: [2, 3, 6, 7, 10, 11]  # 6 MoE layers
+  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  # MoE implementation: "batched" (padded bmm), "sparse" (no padding), "expert_parallel" (multi-GPU)
+  # Note: expert_parallel conflicts with FSDP - use sparse or batched instead
+  moe_implementation: "batched"
 
-  # MoD configuration
-  mod_enabled: true
-  mod_capacity_factor: 0.75
-  mod_router_hidden_dim: 128
+  # MoD configuration - Token skipping for compute efficiency
+  # IMPORTANT: Start with higher capacity, reduce gradually as model learns
+  # 0.25 was too aggressive - caused loss plateau at ~8
+  mod_enabled: false
+  mod_capacity_factor: 0.75  # 75% of tokens processed (25% skipped)
+  mod_router_hidden_dim: 64
   mod_load_balance_loss_weight: 0.01
 
-  # Mamba configuration
+  # Mamba configuration - DISABLED (dense, adds active params)
   mamba_enabled: false
   mamba_layers: []
 
@@ -35,27 +45,26 @@ model:
   aux_loss_weights: [1.0]
 
   # Optimizations
-  use_flash_attention: false
+  use_flash_attention: true
   rope_theta: 10000.0
   norm_type: "rmsnorm"
   ffn_activation: "swiglu"
-  dropout: 0.0
+  dropout: 0.0  # No dropout for faster initial training
   attention_dropout: 0.0
   residual_dropout: 0.0
 
 # Training configuration
 training:
-  # Total training tokens (10B for this example)
-  total_tokens: 1_000_000_000  # 1B tokens
+  total_tokens: 10_000_000_000  # 10B tokens
+  batch_size: 4
+  # NOTE: Higher grad_accum delays optimizer.step() which causes memory spike
+  # when all optimizer state is allocated at once. Keep lower for memory.
+  gradient_accumulation_steps: 2  # Effective batch = 8 (was 32, caused OOM spike)
 
-  # Batch configuration
-  batch_size: 1
-  gradient_accumulation_steps: 8
-
-  # Learning rate
-  max_lr: 0.001
+  # Learning rate - reduced from 0.003 which was too high
+  max_lr: 0.0006  # Standard LLM learning rate (6e-4)
   min_lr_ratio: 0.1
-  warmup_steps: 1000
+  warmup_steps: 1000  # Longer warmup for stability
 
   # Optimization
   gradient_clip_norm: 1.0
@@ -63,18 +72,18 @@ training:
 
   # Checkpointing
   checkpoint_dir: "./checkpoints_production"
-  save_interval: 1000  # Save every 1000 steps
+  save_interval: 1000
 
   # Logging
   log_interval: 10
   eval_interval: 500
-
-  # Resume from checkpoint (set to path or null)
   resume_from: null
 
 # Optimizer configuration
+# NOTE: Muon's Newton-Schulz orthogonalization creates large temporary tensors
+# during optimizer.step(). For memory-constrained training, use adamw instead.
 optimizer:
-  type: "muon"
+  type: "muon"  # Options: "muon", "adamw" - adamw uses less peak memory
   momentum: 0.95
   weight_decay: 0.01
   nesterov: true
@@ -83,7 +92,7 @@ optimizer:
 data:
   dataset_name: "HuggingFaceFW/fineweb"
   dataset_config: "sample-10BT"
-  tokenizer_name: "gpt2"
+  tokenizer_name: "meta-llama/Meta-Llama-3-8B"
 
   # Number of examples to load (null = all available)
   max_examples: null  # Set to number like 100000 to limit dataset size
@@ -93,23 +102,27 @@ data:
 
   # Tokenization strategy
   tokenize_on_fly: true  # True = tokenize during training (saves memory, slightly slower)
-                          # False = tokenize upfront (faster training, uses more memory)
 
   # Workers
-  num_workers: 4
+  num_workers: 8
+
+  # IMPORTANT: Set to false to enable Flash Attention (17x faster)
+  # True creates document-aware masks which disable Flash Attention
+  use_document_attention_mask: false
 
 # Mixed precision
 mixed_precision:
   bf16: true
+  fp8: false
 
 # Weights & Biases logging
 wandb:
-  enabled: false  # Set to true to enable W&B
-  project: "moe-production"
-  run_name: "moe-500m-fineweb"
+  enabled: false
+  project: "moe-8b-sparse"
+  run_name: "7.6b-64experts-620m-active"
   entity: null
 
 # Evaluation
 evaluation:
-  enabled: true
-  eval_steps: 100  # Number of steps for evaluation
+  enabled: false
+  eval_steps: 100

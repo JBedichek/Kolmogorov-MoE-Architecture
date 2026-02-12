@@ -25,6 +25,13 @@ from moe_arch.model.transformer import MoETransformer
 from moe_arch.model.config import AdvancedMoEConfig
 from moe_arch.training.muon_optimizer import get_muon_optimizer
 
+# FP8 support via torchao (PyTorch native)
+try:
+    from torchao.float8 import convert_to_float8_training, Float8LinearConfig
+    HAS_FP8 = True
+except ImportError:
+    HAS_FP8 = False
+
 
 def load_config(config_path: str) -> dict:
     """Load training configuration from YAML file."""
@@ -100,7 +107,7 @@ class OnTheFlyDataCollator:
 class MoEModelWrapper(torch.nn.Module):
     """Wrapper to make MoE model compatible with HuggingFace Trainer."""
 
-    def __init__(self, model):
+    def __init__(self, model, use_fp8: bool = False):
         super().__init__()
         self.model = model
         self.config = model.config
@@ -116,21 +123,38 @@ class MoEModelWrapper(torch.nn.Module):
 class MoETrainer(Trainer):
     """Custom HuggingFace Trainer with Muon optimizer and custom LR scheduler."""
 
-    def __init__(self, muon_config: dict, lr_config: dict, *args, **kwargs):
+    def __init__(self, muon_config: dict, lr_config: dict, log_interval: int = 10, *args, **kwargs):
         self.muon_config = muon_config
         self.lr_config = lr_config
+        self.log_interval = log_interval
+        # Sequence length tracking
+        self._seq_lengths = []
+        self._step_count = 0
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self):
-        """Create Muon optimizer instead of default AdamW."""
+        """Create optimizer based on config (Muon or AdamW)."""
         if self.optimizer is None:
-            print("\n[Creating Muon optimizer...]")
-            self.optimizer = get_muon_optimizer(
-                self.model.model,
-                lr=self.args.learning_rate,
-                momentum=self.muon_config.get('momentum', 0.95),
-                weight_decay=self.muon_config.get('weight_decay', 0.01),
-            )
+            opt_type = self.muon_config.get('type', 'muon').lower()
+
+            if opt_type == 'adamw':
+                print("\n[Creating AdamW optimizer...]")
+                # Standard AdamW - lower peak memory than Muon
+                self.optimizer = torch.optim.AdamW(
+                    self.model.parameters(),
+                    lr=self.args.learning_rate,
+                    betas=(0.9, 0.95),
+                    weight_decay=self.muon_config.get('weight_decay', 0.01),
+                )
+            else:
+                print("\n[Creating Muon optimizer...]")
+                # Use self.model directly - works with FSDP-wrapped model
+                self.optimizer = get_muon_optimizer(
+                    self.model,
+                    lr=self.args.learning_rate,
+                    momentum=self.muon_config.get('momentum', 0.95),
+                    weight_decay=self.muon_config.get('weight_decay', 0.01),
+                )
         return self.optimizer
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
@@ -149,7 +173,7 @@ class MoETrainer(Trainer):
         return self.lr_scheduler
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """Compute loss with empty sequence protection and attention mask support."""
+        """Compute loss with empty sequence protection, attention mask support, and sequence length tracking."""
         model_inputs = {
             'input_ids': inputs['input_ids'],
             'labels': inputs['labels'] if 'labels' in inputs else inputs['input_ids'],
@@ -158,6 +182,27 @@ class MoETrainer(Trainer):
         # Pass attention_mask if available (critical for ignoring padding tokens!)
         if 'attention_mask' in inputs:
             model_inputs['attention_mask'] = inputs['attention_mask']
+            seq_lens = inputs['attention_mask'].sum(dim=1).tolist()
+        else:
+            seq_lens = [model_inputs['input_ids'].shape[1]] * model_inputs['input_ids'].shape[0]
+
+        # Track sequence lengths
+        self._seq_lengths.extend(seq_lens)
+        self._step_count += 1
+
+        # Print stats at log interval
+        if self._step_count % self.log_interval == 0 and len(self._seq_lengths) > 0:
+            avg_len = sum(self._seq_lengths) / len(self._seq_lengths)
+            min_len = min(self._seq_lengths)
+            max_len = max(self._seq_lengths)
+            if torch.cuda.is_available():
+                mem_alloc = torch.cuda.memory_allocated() / 1e9
+                mem_reserved = torch.cuda.memory_reserved() / 1e9
+                mem_str = f" | GPU mem: {mem_alloc:.1f}GB alloc, {mem_reserved:.1f}GB reserved"
+            else:
+                mem_str = ""
+            print(f"  [SeqLen] avg: {avg_len:.1f}, min: {min_len}, max: {max_len} (n={len(self._seq_lengths)}){mem_str}")
+            self._seq_lengths = []  # Reset for next interval
 
         # Skip empty sequences
         if model_inputs['input_ids'].shape[1] == 0:
@@ -207,11 +252,13 @@ def load_and_prepare_dataset(config: dict, tokenizer, split: str = "train"):
 
         if data_config.get('use_streaming', False):
             # For streaming, convert to list with filtering
-            print(f"  Converting streaming dataset to list...")
+            print(f"  Converting streaming dataset to list (max {max_examples:,} examples)...")
             dataset_list = []
             for item in dataset:
                 if has_text(item):
                     dataset_list.append(item)
+                if len(dataset_list) % 10000 == 0:
+                    print(f"    Collected {len(dataset_list):,} examples...")
                 if max_examples and len(dataset_list) >= max_examples:
                     break
             dataset = Dataset.from_list(dataset_list)
@@ -248,11 +295,13 @@ def load_and_prepare_dataset(config: dict, tokenizer, split: str = "train"):
 
     # Convert streaming to list if needed
     if data_config.get('use_streaming', False):
-        print(f"  Converting streaming dataset to list...")
+        print(f"  Converting streaming dataset to list (max {max_examples:,} examples)...")
         tokenized_list = []
         for item in tokenized:
             if len(item['input_ids']) > 0:  # Filter empty sequences
                 tokenized_list.append(item)
+            if len(tokenized_list) % 10000 == 0:
+                print(f"    Collected {len(tokenized_list):,} examples...")
             if max_examples and len(tokenized_list) >= max_examples:
                 break
         tokenized = Dataset.from_list(tokenized_list)
@@ -279,7 +328,32 @@ def main():
         default=None,
         help="Path to checkpoint to resume from (overrides config)",
     )
+    parser.add_argument(
+        "--gpu",
+        type=int,
+        default=None,
+        help="GPU device ID for single GPU training (omit for multi-GPU)",
+    )
     args = parser.parse_args()
+
+    # Single GPU mode if --gpu is specified
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+        for var in ["WORLD_SIZE", "LOCAL_RANK", "RANK", "MASTER_ADDR", "MASTER_PORT"]:
+            os.environ.pop(var, None)
+
+    # Performance optimizations
+    torch.set_float32_matmul_precision('high')  # Use TF32 on Ampere+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
+    # Memory optimizations
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8"
+
+    # Empty cache aggressively
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Load configuration
     print("=" * 80)
@@ -300,7 +374,39 @@ def main():
     print(f"  ✓ Model created: {params['total_billions']:.3f}B params")
     print(f"    Active: {params['active_billions']:.3f}B ({params['sparsity']:.1%} sparsity)")
 
-    # Wrap model
+    # Apply FP8 training if requested
+    use_fp8 = config.get('mixed_precision', {}).get('fp8', False)
+    if use_fp8:
+        if HAS_FP8:
+            print("  Applying FP8 training via torchao...")
+
+            # Filter function: only convert layers where both dims are divisible by 16
+            def fp8_linear_filter(module: torch.nn.Module, fqn: str) -> bool:
+                if not isinstance(module, torch.nn.Linear):
+                    return False
+                # FP8 requires dimensions divisible by 16
+                in_ok = module.in_features % 16 == 0
+                out_ok = module.out_features % 16 == 0
+                if not (in_ok and out_ok):
+                    return False
+                return True
+
+            fp8_config = Float8LinearConfig()
+            convert_to_float8_training(model, config=fp8_config, module_filter_fn=fp8_linear_filter)
+
+            # Count converted vs skipped
+            n_fp8 = sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
+            n_linear = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+            print(f"  ✓ FP8 enabled - {n_fp8} layers converted, {n_linear} kept as Linear (dims not /16)")
+        else:
+            print("  ⚠ FP8 requested but torchao not available, using BF16")
+
+    # Enable gradient checkpointing to reduce activation memory
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+        print("  ✓ Gradient checkpointing enabled")
+
+    # Wrap model for HuggingFace Trainer
     wrapped_model = MoEModelWrapper(model)
 
     # Initialize tokenizer
@@ -349,6 +455,12 @@ def main():
     report_to = ["wandb"] if config['wandb'].get('enabled', False) else ["none"]
     run_name = config['wandb'].get('run_name', 'moe-training')
 
+    # Debug: Check distributed environment variables
+    _world_size = os.environ.get("WORLD_SIZE")
+    _local_rank = os.environ.get("LOCAL_RANK")
+    _is_distributed = bool(_world_size or _local_rank)
+    print(f"\n[DEBUG] WORLD_SIZE={_world_size}, LOCAL_RANK={_local_rank}, is_distributed={_is_distributed}")
+
     # Training arguments
     training_args = TrainingArguments(
         # Output
@@ -389,7 +501,32 @@ def main():
         # Performance
         dataloader_num_workers=config['data'].get('num_workers', 4),
         dataloader_pin_memory=True,
+        dataloader_prefetch_factor=2,
+        dataloader_persistent_workers=True,
         remove_unused_columns=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+
+        # torch.compile for speed
+        # Disable when running distributed (FSDP) - torch.compile + FSDP can cause OOM during compilation
+        torch_compile= not _is_distributed,
+        torch_compile_mode="default",
+
+        # FSDP for multi-GPU - only set if NOT using Accelerate's FSDP config
+        # When using `accelerate launch --config_file fsdp_config.yaml`, Accelerate handles FSDP
+        # Detect Accelerate FSDP via WORLD_SIZE/LOCAL_RANK env vars set by accelerate/torchrun
+        **({} if _is_distributed else {
+            "fsdp": "full_shard auto_wrap offload",
+            "fsdp_config": {
+                "backward_prefetch": "backward_pre",
+                "forward_prefetch": True,
+                "use_orig_params": True,
+                "cpu_ram_efficient_loading": True,
+                "sync_module_states": True,
+                "limit_all_gathers": True,
+                "offload_params": True,
+            },
+        }),
 
         # Other
         seed=42,
@@ -397,11 +534,27 @@ def main():
         load_best_model_at_end=False,
     )
 
+    is_distributed = bool(os.environ.get("WORLD_SIZE") or os.environ.get("LOCAL_RANK"))
+
+    # Force disable torch.compile in distributed mode - HF TrainingArguments may override our setting
+    if is_distributed and training_args.torch_compile:
+        print(f"\n[INFO] Forcing torch_compile=False for distributed training (was overridden to True)")
+        training_args.torch_compile = False
+
+    print(f"\n[DEBUG] torch_compile value passed: {not _is_distributed}, training_args.torch_compile: {training_args.torch_compile}")
     print(f"\nHuggingFace Trainer configuration:")
     print(f"  Max steps: {training_args.max_steps:,}")
     print(f"  Learning rate: {training_args.learning_rate}")
     print(f"  Warmup steps: {training_args.warmup_steps}")
     print(f"  BF16: {training_args.bf16}")
+    if training_args.torch_compile:
+        print(f"  torch.compile: {training_args.torch_compile} (mode={training_args.torch_compile_mode})")
+    else:
+        print(f"  torch.compile: disabled (distributed mode)")
+    if is_distributed:
+        print(f"  FSDP: managed by Accelerate/torchrun")
+    else:
+        print(f"  FSDP: {training_args.fsdp}")
     print(f"  Save interval: {train_config['save_interval']} steps")
     print(f"  Log interval: {train_config['log_interval']} steps")
 
@@ -435,6 +588,7 @@ def main():
     trainer = MoETrainer(
         muon_config=config['optimizer'],
         lr_config=lr_config,
+        log_interval=train_config['log_interval'],
         model=wrapped_model,
         args=training_args,
         train_dataset=train_dataset,

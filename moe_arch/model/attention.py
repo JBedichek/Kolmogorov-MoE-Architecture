@@ -116,11 +116,13 @@ class GroupedQueryAttention(nn.Module):
         v = self._expand_kv(v)  # (batch, seq, n_heads, head_dim)
 
         # Compute attention
-        if self.flash_attn_available and self.use_flash_attention:
-            # Use Flash Attention
+        # NOTE: Flash Attention only supports simple causal mask, not custom masks
+        # Fall back to standard attention when custom attention_mask is provided
+        if self.flash_attn_available and self.use_flash_attention and attention_mask is None:
+            # Use Flash Attention (only when no custom mask needed)
             output = self._flash_attention(q, k, v)
         else:
-            # Use standard attention
+            # Use standard attention (supports custom attention masks)
             output = self._standard_attention(q, k, v, attention_mask)
 
         # Reshape and project output
@@ -224,6 +226,14 @@ class GroupedQueryAttention(nn.Module):
         Returns:
             output: (batch, seq, n_heads, head_dim)
         """
+        # Flash Attention only supports fp16/bf16
+        # Cast to bf16 if needed (will be cast back by autocast)
+        original_dtype = q.dtype
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
+            v = v.to(torch.bfloat16)
+
         # Flash Attention expects: (batch, seq, n_heads, head_dim)
         # and applies causal masking automatically
         output = self.flash_attn_func(
@@ -231,6 +241,10 @@ class GroupedQueryAttention(nn.Module):
             dropout_p=self.dropout if self.training else 0.0,
             causal=True,  # Autoregressive causal masking
         )
+
+        # Cast back to original dtype if needed
+        if output.dtype != original_dtype:
+            output = output.to(original_dtype)
 
         return output
 
