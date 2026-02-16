@@ -127,6 +127,7 @@ class MoETransformer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        return_logits: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass of the model.
@@ -150,6 +151,18 @@ class MoETransformer(nn.Module):
 
         # Get token embeddings
         hidden_states = self.token_embedding(input_ids)  # (batch, seq, d_model)
+
+        # Keep original attention_mask for loss computation (2D: batch, seq_len)
+        loss_attention_mask = attention_mask
+
+        # Convert attention_mask from (batch, seq_len) with 1/0 to additive format
+        # for attention: 0 where attention allowed, -inf where masked
+        if attention_mask is not None:
+            # attention_mask: (batch, seq_len) -> (batch, 1, 1, seq_len)
+            # This will broadcast to (batch, n_heads, seq_len, seq_len)
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            # Convert: 1 -> 0, 0 -> -inf
+            attention_mask = (1.0 - attention_mask.to(hidden_states.dtype)) * torch.finfo(hidden_states.dtype).min
 
         # Forward through all transformer blocks
         # Collect auxiliary losses from MoE layers
@@ -200,8 +213,9 @@ class MoETransformer(nn.Module):
 
         if labels is not None:
             # Compute multi-token prediction loss with attention mask
+            # Use loss_attention_mask (2D) not attention_mask (4D additive)
             multitoken_loss, multitoken_loss_dict = self.multitoken_loss(
-                logits_list, labels, attention_mask=attention_mask
+                logits_list, labels, attention_mask=loss_attention_mask
             )
             lm_loss = multitoken_loss
 
@@ -211,14 +225,19 @@ class MoETransformer(nn.Module):
             else:
                 loss = lm_loss
 
-        return {
-            "logits": logits,  # Main head logits for generation
-            "logits_list": logits_list,  # All heads for analysis
+        result = {
             "loss": loss,
             "lm_loss": lm_loss,
-            "multitoken_loss_dict": multitoken_loss_dict,
             "aux_loss": total_aux_loss if self.training else 0.0,
         }
+
+        # Only return logits when needed (inference/generation) to save memory
+        if return_logits:
+            result["logits"] = logits
+            result["logits_list"] = logits_list
+            result["multitoken_loss_dict"] = multitoken_loss_dict
+
+        return result
 
     @torch.no_grad()
     def generate(

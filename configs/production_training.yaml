@@ -5,25 +5,38 @@
 
 # Model configuration
 model:
-  vocab_size: 128256  # Llama 3 tokenizer vocab size
-  d_model: 1024
-  n_layers: 18
+  vocab_size: 32000  # Llama 2 tokenizer vocab size (4x smaller, minimal compression loss for English)
+  d_model: 2048
+  n_layers: 14
   n_heads: 8
   n_kv_heads: 4  # GQA 4:1 ratio
-  head_dim: 128
+  head_dim: 256
   d_ff: 5504  # Only used for non-MoE layers (if any)
   max_seq_len: 2048
 
-  # MoE configuration - 64 experts for EXTREME sparsity
-  # With 64 experts and top_k=2: only 3.1% of expert capacity active
-  # Total: 7.64B params, Active: 0.62B params (8.1% active ratio)
-  n_experts: 32
-  moe_top_k: 2
+  # MoE configuration - 16 experts with top_k=2
+  # Total: 2.83B params, Active: 0.47B params (83.5% sparsity)
+  n_experts: 16
+  moe_top_k: 4
   moe_capacity_factor: 1.25
-  d_ff_expert: 3096
-  moe_load_balance_loss_weight: 0.01
-  moe_router_z_loss_weight: 0.001
-  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  d_ff_expert: 2048
+
+  # Routing strategy:
+  # - "token_choice": Tokens select top-k experts (standard, can collapse without aux loss)
+  # - "expert_choice": Experts select top-k tokens (perfect balance, collapse-resistant)
+  # Expert-choice is recommended if experiencing router collapse
+  moe_routing: "expert_choice"
+  # Balanced routing (for token_choice only): enforces capacity constraints per expert
+  # Each expert can only handle (n_tokens * top_k / n_experts) tokens per batch
+  # This prevents collapse while maintaining token-choice semantics
+  moe_balanced_routing: false
+
+  # Auxiliary loss weights (only used with token_choice routing)
+  # With expert_choice routing, load balance is perfect by construction
+  moe_load_balance_loss_weight: 0.1
+  moe_router_z_loss_weight: 0.01
+
+  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
   # MoE implementation: "batched" (padded bmm), "sparse" (no padding), "expert_parallel" (multi-GPU)
   # Note: expert_parallel conflicts with FSDP - use sparse or batched instead
   moe_implementation: "batched"
@@ -83,16 +96,22 @@ training:
 # NOTE: Muon's Newton-Schulz orthogonalization creates large temporary tensors
 # during optimizer.step(). For memory-constrained training, use adamw instead.
 optimizer:
-  type: "muon"  # Options: "muon", "adamw" - adamw uses less peak memory
+  type: "adamw"  # Options: "muon", "adamw" - adamw uses less peak memory
+  # AdamW settings
+  adamw_lr: 0.00005  # Standard LLM learning rate for AdamW
+  adamw_betas: [0.9, 0.999]
+  # Muon settings (typically uses higher LR than AdamW)
+  muon_lr: 0.01  # Muon can use 10-100x higher LR
   momentum: 0.95
-  weight_decay: 0.01
   nesterov: true
+  # Shared
+  weight_decay: 0.01
 
 # Data configuration
 data:
   dataset_name: "HuggingFaceFW/fineweb"
   dataset_config: "sample-10BT"
-  tokenizer_name: "meta-llama/Meta-Llama-3-8B"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"
 
   # Number of examples to load (null = all available)
   max_examples: null  # Set to number like 100000 to limit dataset size

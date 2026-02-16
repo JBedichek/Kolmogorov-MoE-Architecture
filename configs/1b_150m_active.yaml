@@ -1,0 +1,112 @@
+# 1B Total / 150M Active Parameter Configuration
+# Designed for efficient training with high sparsity
+#
+# Total params:  ~948M
+# Active params: ~156M (16.4% active, 83.6% sparse)
+#
+# Memory estimates (bf16):
+#   Model weights:     1.9 GB
+#   Gradients:         1.9 GB
+#   Optimizer state:   3.8 GB
+#   Total training:    ~8 GB (+ activations)
+
+model:
+  vocab_size: 32000  # Llama 2 tokenizer
+  d_model: 1512
+  n_layers: 24
+  n_heads: 12
+  n_kv_heads: 2  # GQA 2:1 ratio
+  head_dim: 126
+  d_ff: 2048  # Not used (all layers are MoE)
+  max_seq_len: 2048
+
+  # MoE configuration - 16 experts, top-2 routing
+  # Expert params: 906M (95% of model)
+  # Active expert params: 113M per forward pass
+  n_experts: 164
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 256
+  # High aux loss weights to prevent router collapse
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # All layers MoE
+  moe_implementation: "batched"
+  moe_routing: "expert_choice"
+
+  # MoD disabled for stability
+  mod_enabled: false
+  mod_capacity_factor: 1.0
+  mod_router_hidden_dim: 64
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba disabled
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Single token prediction
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.1
+  attention_dropout: 0.1
+  residual_dropout: 0.0
+
+training:
+  total_tokens: 10_000_000_000  # 10B tokens
+  batch_size: 8
+  gradient_accumulation_steps: 4  # Effective batch = 32
+
+  # Learning rate
+  max_lr: 0.001
+  min_lr_ratio: 0.1
+  warmup_steps: 1000
+
+  # Optimization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Checkpointing
+  checkpoint_dir: "./checkpoints_1b"
+  save_interval: 2000
+  log_interval: 10
+  eval_interval: 500
+  resume_from: null
+
+optimizer:
+  type: "muon"
+  adamw_lr: 0.0003
+  adamw_betas: [0.9, 0.95]
+  muon_lr: 0.01
+  momentum: 0.95
+  nesterov: true
+  weight_decay: 0.05
+
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"
+  max_examples: null
+  use_streaming: false
+  tokenize_on_fly: true
+  num_workers: 8
+  use_document_attention_mask: false
+
+mixed_precision:
+  bf16: true
+  fp8: false
+
+wandb:
+  enabled: false
+  project: "moe-1b-sparse"
+  run_name: "1b-16experts-156m-active"
+  entity: null
+
+evaluation:
+  enabled: false
+  eval_steps: 100

@@ -1,0 +1,45 @@
+{
+  "checkpoint": "checkpoints_quick/checkpoint-2000.pt",
+  "config": "configs/debug_no_mod.yaml",
+  "settings": {
+    "tokens_per_dataset": 3000000,
+    "seq_len": 1024,
+    "stride": 512
+  },
+  "results": {
+    "wikipedia": {
+      "perplexity": null,
+      "loss": null,
+      "error": "Could not load data"
+    },
+    "reddit": {
+      "perplexity": 1507.93444139261,
+      "loss": 7.3184960737453055,
+      "num_tokens": 5992734,
+      "eval_time_s": 208.14445281028748
+    },
+    "cc_news": {
+      "perplexity": 1142.2267120573993,
+      "loss": 7.040734892454763,
+      "num_tokens": 5992734,
+      "eval_time_s": 208.09673190116882
+    },
+    "arxiv": {
+      "perplexity": null,
+      "loss": null,
+      "error": "Could not load data"
+    },
+    "stackexchange": {
+      "perplexity": 1147.2586472806986,
+      "loss": 7.045130590645272,
+      "num_tokens": 5992734,
+      "eval_time_s": 204.88886165618896
+    },
+    "books": {
+      "perplexity": 1669.2336727064674,
+      "loss": 7.420119921474906,
+      "num_tokens": 5992734,
+      "eval_time_s": 205.465993642807
+    }
+  }
+}

@@ -40,6 +40,14 @@ class AdvancedMoEConfig:
     # - "sparse": True sparse computation (no padding waste, better for many experts)
     # - "expert_parallel": Distributed experts across GPUs (for multi-GPU training)
     moe_implementation: str = "batched"
+    # MoE routing type:
+    # - "token_choice": Tokens select top-k experts (standard, can collapse)
+    # - "expert_choice": Experts select top-k tokens (perfect load balance, collapse-resistant)
+    moe_routing: str = "token_choice"
+    # Balanced routing: enforce capacity constraints per expert to prevent collapse
+    # When True, uses balanced top-k assignment instead of pure top-k
+    # Each expert can only handle (n_tokens * top_k / n_experts) tokens per batch
+    moe_balanced_routing: bool = False
     # Layers that use MoE (0-indexed)
     # Pattern: layers 2, 3, 6, 7, 9, 10, 11, 14, 15, 17, 18, 19, 22, 23, 25, 26, 27, 30, 31
     # Note: Layers 9, 17, 25 are Mamba layers that will use RoutingMamba (RoM)

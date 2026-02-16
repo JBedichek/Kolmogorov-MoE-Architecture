@@ -316,38 +316,39 @@ class Muon(Optimizer):
                 # Orthogonalize momentum for matrix-like parameters
                 # For 2D+ tensors, apply orthogonalization
                 if p.dim() >= 2:
-                    # Reshape to 2D matrix for orthogonalization
                     original_shape = buf.shape
 
-                    # For Conv weights (4D: out, in, h, w), reshape to (out, in*h*w)
-                    # For Linear weights (2D: out, in), keep as is
                     if p.dim() == 2:
-                        buf_2d = buf
-                    else:
-                        # Flatten all dims except first
-                        buf_2d = buf.reshape(buf.shape[0], -1)
-
-                    # Apply orthogonalization
-                    if backend == 'qr':
-                        # QR decomposition (more expensive but exact)
-                        if buf_2d.shape[0] <= buf_2d.shape[1]:
-                            # More columns than rows: orthogonalize rows
-                            Q, R = torch.linalg.qr(buf_2d.T)
-                            buf_ortho = Q.T
+                        # Standard 2D matrix
+                        if backend == 'qr':
+                            if buf.shape[0] <= buf.shape[1]:
+                                Q, R = torch.linalg.qr(buf.T)
+                                buf_ortho = Q.T
+                            else:
+                                Q, R = torch.linalg.qr(buf)
+                                buf_ortho = Q
                         else:
-                            # More rows than columns: orthogonalize columns
-                            Q, R = torch.linalg.qr(buf_2d)
-                            buf_ortho = Q
-                    else:
-                        # Newton-Schulz iteration (faster approximation)
-                        buf_ortho = self._newton_schulz_orthogonalize(
-                            buf_2d, newton_iters
-                        )
-
-                    # Reshape back
-                    if p.dim() == 2:
+                            buf_ortho = self._newton_schulz_orthogonalize(buf, newton_iters)
                         buf.copy_(buf_ortho)
+
+                    elif p.dim() == 3:
+                        # Batched 2D matrices (e.g., MoE experts: [n_experts, d_in, d_out])
+                        # Apply orthogonalization to each expert independently
+                        buf_ortho = self._newton_schulz_orthogonalize_batched(buf, newton_iters)
+                        buf.copy_(buf_ortho)
+
                     else:
+                        # 4D+ (e.g., Conv): flatten to 2D
+                        buf_2d = buf.reshape(buf.shape[0], -1)
+                        if backend == 'qr':
+                            if buf_2d.shape[0] <= buf_2d.shape[1]:
+                                Q, R = torch.linalg.qr(buf_2d.T)
+                                buf_ortho = Q.T
+                            else:
+                                Q, R = torch.linalg.qr(buf_2d)
+                                buf_ortho = Q
+                        else:
+                            buf_ortho = self._newton_schulz_orthogonalize(buf_2d, newton_iters)
                         buf.copy_(buf_ortho.reshape(original_shape))
 
                 # Apply update
@@ -410,6 +411,48 @@ class Muon(Optimizer):
                 Y = 1.5 * Y - 0.5 * (Y @ YTY)  # (m, n)
 
             return Y
+
+    @staticmethod
+    def _newton_schulz_orthogonalize_batched(
+        matrices: torch.Tensor,
+        num_iters: int = 5,
+    ) -> torch.Tensor:
+        """
+        Orthogonalize batched matrices using Newton-Schulz iteration.
+
+        Applies orthogonalization independently to each 2D matrix in the batch.
+        Uses batched matrix multiply (bmm) for efficiency.
+
+        Args:
+            matrices: 3D tensor (batch, m, n) - batch of 2D matrices
+            num_iters: Number of iterations (5-10 usually sufficient)
+
+        Returns:
+            Batch of approximately orthogonalized matrices (batch, m, n)
+        """
+        batch, m, n = matrices.shape
+
+        # Normalize each matrix independently
+        # Compute per-matrix norms: (batch,)
+        norms = matrices.reshape(batch, -1).norm(dim=1, keepdim=True).unsqueeze(-1)  # (batch, 1, 1)
+        Y = matrices / (norms + 1e-7)
+
+        if m <= n:
+            # Wide matrices: orthogonalize rows
+            for _ in range(num_iters):
+                # Y @ Y.T: (batch, m, n) @ (batch, n, m) -> (batch, m, m)
+                YYT = torch.bmm(Y, Y.transpose(-2, -1))
+                # (YYT @ Y): (batch, m, m) @ (batch, m, n) -> (batch, m, n)
+                Y = 1.5 * Y - 0.5 * torch.bmm(YYT, Y)
+        else:
+            # Tall matrices: orthogonalize columns
+            for _ in range(num_iters):
+                # Y.T @ Y: (batch, n, m) @ (batch, m, n) -> (batch, n, n)
+                YTY = torch.bmm(Y.transpose(-2, -1), Y)
+                # Y @ YTY: (batch, m, n) @ (batch, n, n) -> (batch, m, n)
+                Y = 1.5 * Y - 0.5 * torch.bmm(Y, YTY)
+
+        return Y
 
     def zero_grad(self, set_to_none: bool = True):
         """Zero gradients (optionally set to None for memory efficiency)."""

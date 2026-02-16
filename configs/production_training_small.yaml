@@ -1,0 +1,120 @@
+# Small Production Training Configuration for MoE with FineWeb
+# Target: ~1B total params with good sparsity
+# ~315M active params (31% of total) with top_k=2
+# 8 experts with top_k=2 for router training
+
+# Model configuration
+model:
+  vocab_size: 32000  # Llama 2 tokenizer vocab size
+  d_model: 1024
+  n_layers: 10
+  n_heads: 8
+  n_kv_heads: 4  # GQA 2:1 ratio
+  head_dim: 128
+  d_ff: 4096  # Only used for non-MoE layers (if any)
+  max_seq_len: 2048
+
+  # MoE configuration - 8 experts with top_k=2
+  # Total: ~1B params, Active: ~315M params (31% active)
+  n_experts: 8
+  moe_top_k: 4
+  moe_capacity_factor: 1.25
+  d_ff_expert: 4096
+
+  # Routing strategy:
+  # - "token_choice": Tokens select top-k experts (standard, can collapse without aux loss)
+  # - "expert_choice": Experts select top-k tokens (perfect balance, collapse-resistant)
+  moe_routing: "token_choice"
+  moe_balanced_routing: false
+
+  # Auxiliary loss weights (only used with token_choice routing)
+  moe_load_balance_loss_weight: 0.1
+  moe_router_z_loss_weight: 0.01
+
+  moe_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  moe_implementation: "batched"
+
+  # MoD configuration - disabled for simplicity
+  mod_enabled: false
+  mod_capacity_factor: 0.75
+  mod_router_hidden_dim: 64
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration - disabled
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Multi-token prediction
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  total_tokens: 5_000_000_000  # 5B tokens (smaller model, less data needed)
+  batch_size: 8  # Can use larger batch with smaller model
+  gradient_accumulation_steps: 4  # Effective batch = 32
+
+  # Learning rate
+  max_lr: 0.0003  # 3e-4, standard for ~1B models
+  min_lr_ratio: 0.1
+  warmup_steps: 500
+
+  # Optimization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Checkpointing
+  checkpoint_dir: "./checkpoints_small"
+  save_interval: 1000
+
+  # Logging
+  log_interval: 10
+  eval_interval: 500
+  resume_from: null
+
+# Optimizer configuration
+optimizer:
+  type: "adamw"
+  adamw_lr: 0.00005
+  adamw_betas: [0.9, 0.999]
+  muon_lr: 0.02
+  momentum: 0.95
+  nesterov: true
+  weight_decay: 0.1
+
+# Data configuration
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"
+  max_examples: null
+  use_streaming: false
+  tokenize_on_fly: true
+  num_workers: 8
+  use_document_attention_mask: false
+
+# Mixed precision
+mixed_precision:
+  bf16: true
+  fp8: false
+
+# Weights & Biases logging
+wandb:
+  enabled: false
+  project: "moe-1b-sparse"
+  run_name: "1b-8experts-315m-active"
+  entity: null
+
+# Evaluation
+evaluation:
+  enabled: false
+  eval_steps: 100

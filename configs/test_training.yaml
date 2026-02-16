@@ -1,0 +1,86 @@
+# Small Test Configuration for Gradient Flow Verification
+# Uses minimal parameters to fit in memory
+
+# Model configuration
+model:
+  vocab_size: 32000  # Llama 2 tokenizer (4x smaller, efficient for English)
+  d_model: 256
+  n_layers: 4
+  n_heads: 4
+  n_kv_heads: 2
+  head_dim: 64
+  d_ff: 1024
+  max_seq_len: 512
+
+  # MoE configuration
+  n_experts: 8
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 512
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [0, 1, 2, 3]
+  moe_implementation: "sparse"
+
+  # MoD configuration
+  mod_enabled: true
+  mod_capacity_factor: 0.5
+  mod_router_hidden_dim: 32
+  mod_load_balance_loss_weight: 0.01
+
+  # Disable Mamba for testing
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Single token prediction
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  total_tokens: 100_000
+  batch_size: 2
+  gradient_accumulation_steps: 2
+
+  max_lr: 0.003
+  min_lr_ratio: 0.1
+  warmup_steps: 10
+
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  checkpoint_dir: "./checkpoints_test"
+  save_interval: 100
+
+  log_interval: 5
+
+# Optimizer
+optimizer:
+  type: "adamw"
+  weight_decay: 0.01
+
+# Data configuration
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"  # 32K vocab, efficient for English
+  max_examples: 1000
+  use_streaming: false
+  tokenize_on_fly: true
+
+# Mixed precision
+mixed_precision:
+  bf16: true
+
+# Disable logging
+wandb:
+  enabled: false

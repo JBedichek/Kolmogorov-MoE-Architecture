@@ -3,17 +3,17 @@
 # If loss still plateaus, problem is elsewhere (MoE, data, LR, etc.)
 
 model:
-  vocab_size: 128256
+  vocab_size: 32000  # Llama 2 tokenizer (4x smaller, efficient for English)
   d_model: 1024
   n_layers: 18
   n_heads: 8
   n_kv_heads: 4
   head_dim: 128
   d_ff: 5504
-  max_seq_len: 1024  # Reduced for memory
+  max_seq_len: 2048  # Reduced for memory
 
   # MoE - keep this
-  n_experts: 32
+  n_experts: 28
   moe_top_k: 2
   moe_capacity_factor: 1.25
   d_ff_expert: 3096
@@ -51,12 +51,12 @@ training:
   gradient_accumulation_steps: 16
 
   # Conservative learning rate
-  max_lr: 0.0003
+  max_lr: 0.006
   min_lr_ratio: 0.1
   warmup_steps: 500
 
   gradient_clip_norm: 1.0
-  weight_decay: 0.01
+  weight_decay: 0.1
 
   checkpoint_dir: "./checkpoints_debug"
   save_interval: 500
@@ -65,13 +65,18 @@ training:
   resume_from: null
 
 optimizer:
-  type: "muon"  # Use AdamW instead of Muon for debugging
+  type: "muon"  # Options: "muon", "adamw"
+  adamw_lr: 0.0003
+  adamw_betas: [0.9, 0.95]
+  muon_lr: 0.02
+  momentum: 0.95
+  nesterov: true
   weight_decay: 0.01
 
 data:
   dataset_name: "HuggingFaceFW/fineweb"
   dataset_config: "sample-10BT"
-  tokenizer_name: "meta-llama/Meta-Llama-3-8B"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"
   max_examples: 100000  # Smaller for faster iteration
   use_streaming: false
   tokenize_on_fly: true

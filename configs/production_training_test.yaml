@@ -1,0 +1,104 @@
+# Test Configuration - Small model for fast iteration
+# ~100M params for quick debugging
+
+# Model configuration
+model:
+  vocab_size: 32000  # Llama 2 tokenizer (4x smaller, efficient for English)
+  d_model: 512
+  n_layers: 4
+  n_heads: 8
+  n_kv_heads: 2  # GQA 4:1 ratio
+  head_dim: 64
+  d_ff: 1408  # Only used for non-MoE layers
+  max_seq_len: 512
+
+  # MoE configuration - small for testing
+  n_experts: 8
+  moe_top_k: 2
+  moe_capacity_factor: 1.25
+  d_ff_expert: 1408
+  moe_load_balance_loss_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  moe_layers: [0, 1, 2, 3]  # All layers MoE
+
+  # MoD configuration - DISABLED for testing
+  mod_enabled: false
+  mod_capacity_factor: 0.5
+  mod_router_hidden_dim: 64
+  mod_load_balance_loss_weight: 0.01
+
+  # Mamba configuration - DISABLED
+  mamba_enabled: false
+  mamba_layers: []
+
+  # Single token prediction for simplicity
+  n_pred_tokens: 1
+  aux_loss_weights: [1.0]
+
+  # Optimizations
+  use_flash_attention: true
+  rope_theta: 10000.0
+  norm_type: "rmsnorm"
+  ffn_activation: "swiglu"
+  dropout: 0.0
+  attention_dropout: 0.0
+  residual_dropout: 0.0
+
+# Training configuration
+training:
+  total_tokens: 100_000_000  # 100M tokens for quick test
+  batch_size: 8
+  gradient_accumulation_steps: 1
+
+  # Learning rate
+  max_lr: 0.003
+  min_lr_ratio: 0.1
+  warmup_steps: 100  # Fast warmup for testing
+
+  # Optimization
+  gradient_clip_norm: 1.0
+  weight_decay: 0.01
+
+  # Checkpointing
+  checkpoint_dir: "./checkpoints_test"
+  save_interval: 500
+
+  # Logging
+  log_interval: 10
+  eval_interval: 200
+  resume_from: null
+
+# Optimizer configuration
+optimizer:
+  type: "muon"
+  momentum: 0.95
+  weight_decay: 0.01
+  nesterov: true
+
+# Data configuration
+data:
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"
+  tokenizer_name: "meta-llama/Llama-2-7b-hf"  # 32K vocab, efficient for English
+  max_examples: 50000  # Limit examples for fast testing
+  use_streaming: false
+  tokenize_on_fly: true
+  num_workers: 4
+  use_document_attention_mask: false  # Enable Flash Attention (17x faster)
+
+# Mixed precision
+mixed_precision:
+  bf16: true
+  fp8: false
+
+# Weights & Biases logging
+wandb:
+  enabled: false
+  project: "moe-test"
+  run_name: "test-run"
+  entity: null
+
+# Evaluation
+evaluation:
+  enabled: false
+  eval_steps: 100
